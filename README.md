@@ -11,7 +11,7 @@ automatically while you game or stream, so the GPU stays usable.
 | **Whisper** (Wyoming, GPU) | Speech-to-text for Assist, biased toward your Home Assistant device names | 10300 |
 | **Piper** (Wyoming, CPU) | Text-to-speech for Assist | 10200 |
 | **Speech API** | OpenAI-style `/v1/audio/transcriptions` + `/v1/audio/speech` in front of Whisper/Piper, for the watch | 10310 |
-| **Assist relay** | Takes Home Assistant `/api/conversation/process` calls and runs them through your **Assist pipeline**, for apps that can't choose an agent (Wristotle) | 10320 (localhost) |
+| **Assist relay** | Runs Home Assistant `/api/conversation/process` calls and OpenAI `/v1/chat/completions` calls through your **Assist pipeline**, for apps that can't choose an agent (Wristotle's HA commands and Ask Agent) | 10320 (localhost) |
 
 Default modes (edit in `config.json`):
 
@@ -267,7 +267,26 @@ local handling), passes your token through to Home Assistant, and keeps follow-u
    (= the PC's default Piper voice; or a Piper voice name such as `en_US-amy-medium`).
 5. Under **Test**, tap **Speak on watch (primary only)**.
 
-### 4.6 Try it
+### 4.6 Ask Agent through the same pipeline (optional)
+The Assist relay also speaks the OpenAI chat API, so Wristotle's **Ask Agent** can use your Assist pipeline too:
+device control, questions about the house and general questions, with no MCP setup.
+**Settings → Voice & AI → Ask Agent**
+
+| Field | Value |
+|---|---|
+| Provider | **OpenAI-compatible** |
+| Endpoint URL (full /chat/completions) | `https://<pc>.<tailnet>.ts.net:8443/v1/chat/completions` |
+| API key | the Home Assistant token from step 3.1 |
+| Model | `assist` (any value works) |
+| Routing | **Send unrecognised speech to Ask Agent**: phone commands (calls, texts, timers) stay on the phone, everything else goes to Assist without a wake word. Or **Ask Agent only**. |
+| Response timeout | **20** seconds |
+| Turns to remember | **0**: Home Assistant keeps the conversation itself for 5 minutes |
+
+Leave the MCP servers empty. The relay ignores Wristotle's system prompt, history and tools: the newest request
+is run through your preferred Assist pipeline, and its spoken reply comes back as the agent's answer. Follow-ups
+("what about the near one?") keep their context.
+
+### 4.7 Try it
 Press the watch's dictation button and say *"Home assistant, turn on the kitchen light."*
 On the PC, `logs\speechApi.err.log` shows what Whisper heard and `logs\haRelay.err.log` shows the command and
 Home Assistant's reply.
