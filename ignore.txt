@@ -1,0 +1,8 @@
+# Programs inside game folders that should NOT count as a game, one .exe name per line.
+wallpaper32.exe
+wallpaper64.exe
+webwallpaper32.exe
+ui32.exe
+crashreportclient.exe
+unitycrashhandler64.exe
+easyanticheat.exe

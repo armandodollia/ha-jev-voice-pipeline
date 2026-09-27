@@ -1,0 +1,5 @@
+# Extra games to detect by .exe name, one per line. Steam games and anything under the Epic, EA,
+# Ubisoft or Xbox game folders are detected automatically; list games installed elsewhere
+# (e.g. Battle.net games in C:\Program Files (x86)\). Examples:
+# overwatch.exe
+# wow.exe

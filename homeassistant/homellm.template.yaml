@@ -1,0 +1,87 @@
+# Home LLM package for Home Assistant.
+# Copy to /config/packages/homellm.yaml and make sure configuration.yaml has:
+#   homeassistant:
+#     packages: !include_dir_named packages
+# __LLM_HOST__ is the GPU PC (filled in by install.ps1); give it a DHCP reservation so it doesn't change.
+
+rest_command:
+  homellm_decision:
+    url: "http://__LLM_HOST__:__LLM_PORT__/v1/decision"
+    method: POST
+    content_type: "application/json"
+    timeout: 30   # a mode switch takes up to ~15 s; normal decisions take well under a second
+    payload: >
+      {{ {"model": "home",
+          "instructions": instructions,
+          "schema": schema,
+          "contexts": [context]} | to_json }}
+
+script:
+  # Ask the local model a set of multiple-choice questions and get the answers back.
+  # Use from automations with `action: script.homellm_decide` + `response_variable`.
+  homellm_decide:
+    alias: "Home LLM: decide"
+    mode: parallel
+    fields:
+      instructions:
+        description: "What the model should do"
+        example: "Answer each question about the house from its current state."
+      schema:
+        description: "Fields to decide: enum (choices), boolean, or integer (minimum/maximum)"
+        example: '{"turn_on_lights": {"type": "boolean", "description": "Should the living room lights be on?"}}'
+      context:
+        description: "The situation, as text"
+        example: "It is 19:40, sun below horizon, motion in living room 1 minute ago."
+    sequence:
+      - action: rest_command.homellm_decision
+        data:
+          instructions: "{{ instructions }}"
+          schema: "{{ schema }}"
+          context: "{{ context }}"
+        response_variable: resp
+      - variables:
+          result: >
+            {% if resp.status == 200 %}
+              {{ {"ok": true,
+                  "decision": resp.content.results[0].decision,
+                  "fields": resp.content.results[0].fields,
+                  "ms": resp.content.timings.total_ms} }}
+            {% else %}
+              {{ {"ok": false, "status": resp.status} }}
+            {% endif %}
+      - stop: "done"
+        response_variable: result
+
+automation:
+  # Example: let the model decide the living room scene when motion is detected after dark.
+  # Enable and adapt the entity ids to your home.
+  - id: homellm_example_living_room
+    alias: "Home LLM example: living room scene on motion"
+    initial_state: false
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.living_room_motion
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: sun.sun
+        state: below_horizon
+    actions:
+      - action: script.homellm_decide
+        data:
+          instructions: "You control the lights of a home. Answer each question from the current state."
+          schema:
+            scene:
+              type: enum
+              choices: ["off", "dim", "relax", "bright"]
+              description: "Which lighting scene fits the living room right now?"
+          context: >
+            Time {{ now().strftime('%H:%M') }}.
+            TV is {{ states('media_player.living_room_tv') }}.
+            Living room lights are {{ states('light.living_room') }}.
+        response_variable: answer
+      - if: "{{ answer.ok and answer.fields.scene.probability > 0.6 }}"
+        then:
+          - action: scene.turn_on
+            target:
+              entity_id: "scene.living_room_{{ answer.decision.scene }}"

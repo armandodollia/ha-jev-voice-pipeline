@@ -1,0 +1,12 @@
+# Per-machine settings and secrets
+config.json
+hass_token.txt
+homeassistant/homellm.yaml
+
+# Created by install.ps1
+llama.cpp/
+models/
+voice/
+state/
+logs/
+__pycache__/

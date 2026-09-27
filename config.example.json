@@ -1,0 +1,67 @@
+{
+  "_comment": "Copy to config.json and edit. install.ps1 creates config.json from this file on first run.",
+
+  "llm": {
+    "port": 8080,
+    "alias": "home",
+    "cudaArch": "89",
+    "fork": { "repo": "thecodacus/llama.cpp", "branch": "parallel-decision" },
+    "upgradeDelaySec": 90,
+    "commonArgs": ["-ngl", "99", "-fa", "on", "--jinja", "--parallel", "1", "-ctk", "q8_0", "-ctv", "q8_0", "--no-webui"],
+    "modes": {
+      "full": {
+        "_when": "PC idle",
+        "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
+      },
+      "stream": {
+        "_when": "Apollo/Sunshine stream active",
+        "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
+      },
+      "game": {
+        "_when": "a game is running locally",
+        "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
+      }
+    }
+  },
+
+  "voice": {
+    "enabled": true,
+    "python": "",
+    "whisperModel": "large-v3-turbo",
+    "language": "en",
+    "piperVoice": "en_US-hfc_female-medium",
+    "endpointingSec": 0.8,
+    "ports": { "wyomingStt": 10300, "wyomingTts": 10200, "speechApi": 10310, "haRelay": 10320 }
+  },
+
+  "homeAssistant": {
+    "url": "http://homeassistant.local:8123",
+    "tokenFile": "hass_token.txt"
+  },
+
+  "tailscale": {
+    "_comment": "Remote access over your tailnet (see README > Tailscale). Set enabled=false for LAN-only.",
+    "enabled": true,
+    "login": true,
+    "authKeyFile": "",
+    "hostname": "",
+    "unattended": true,
+    "allowTailnetFirewall": true,
+    "serve": {
+      "_comment": "HTTPS ports published inside the tailnet only (0 = don't publish).",
+      "speechApi": 443,
+      "haRelay": 8443,
+      "llm": 0
+    },
+    "advertiseLanRoute": false
+  },
+
+  "apollo": {
+    "enabled": "auto",
+    "confPath": "C:\\Program Files\\Apollo\\config\\sunshine.conf",
+    "serviceName": "ApolloService"
+  }
+}
