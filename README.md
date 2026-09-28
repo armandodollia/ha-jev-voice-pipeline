@@ -286,7 +286,31 @@ Leave the MCP servers empty. The relay ignores Wristotle's system prompt, histor
 is run through your preferred Assist pipeline, and its spoken reply comes back as the agent's answer. Follow-ups
 ("what about the near one?") keep their context.
 
-### 4.7 Try it
+**Which routing?** Wristotle first checks speech against its own on-phone commands (calls, texts, reminders,
+alarms/timers, music, notes, tasks, weather, calculator); Home Assistant commands ("home assistant, …") go to the
+relay; Ask Agent gets the rest:
+
+| Routing | Behaviour | Calls / texts |
+|---|---|---|
+| Off (default) | Ask Agent only with its trigger words ("ask agent …", custom words) | unaffected |
+| **Send unrecognised speech to Ask Agent** | phone commands first, anything unmatched goes to Assist | unaffected (recommended) |
+| Ask Agent only | every command goes to Assist, skipping phone commands | **lost**: Assist can't place calls or send texts |
+
+Phrasings Wristotle's recognizer misses go to Assist, which will say it can't do them; the optional sentence model
+under *Models & learning* helps it match loosely phrased phone commands.
+
+### 4.7 Weather questions
+"What's the weather" is one of Wristotle's **own** commands, so it never reaches Ask Agent, and:
+- it only knows **current** conditions ("tomorrow" is ignored);
+- without a city it needs a recent phone location, but Wristotle only has *while in use* location access
+  (no background access, no default-city setting), so from the watch it usually answers *"No recent location"*.
+
+Instead say **"weather in <city>"**, or ask Home Assistant, which knows your home location:
+*"home assistant, what's the weather?"* / *"ask agent, what's the weather tomorrow?"*. Expose a weather entity to
+Assist for current conditions; forecasts need a small script around `weather.get_forecasts` exposed as a tool,
+because HA doesn't give forecasts to the model by default.
+
+### 4.8 Try it
 Press the watch's dictation button and say *"Home assistant, turn on the kitchen light."*
 On the PC, `logs\speechApi.err.log` shows what Whisper heard and `logs\haRelay.err.log` shows the command and
 Home Assistant's reply.
