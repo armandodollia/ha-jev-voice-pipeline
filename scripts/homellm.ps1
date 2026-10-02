@@ -1,12 +1,18 @@
-# Home LLM supervisor: keeps exactly one llama-server running (OpenAI API + Jev-mode /v1/decision,
-# model alias from config) and picks the model from what the PC is doing:
-#   full   - idle
-#   stream - Apollo/Sunshine stream active (flag written by apollo-stream.ps1)
-#   game   - a game is running locally (Steam RunningAppID, or a process under a game library folder)
-# Smaller models load immediately; bigger ones only after the trigger has been gone for upgradeDelaySec.
-# Modes that use the same model and arguments switch without restarting the server.
+# Home LLM supervisor: keeps at most one llama-server running (OpenAI API + Jev-mode /v1/decision, model alias from
+# config) and sizes what runs on the GPU by how much VRAM everything else uses ("others": games, stream encoder,
+# desktop, other GPU jobs). Tiers come from config.json llm.tiers, best first; a tier is allowed while others stays
+# below its maxOthersMiB. Defaults:
+#   full  (others < 10 GB) Gemma 4 12B + Whisper
+#   small (others < 16 GB) Qwen3.5 4B + Whisper
+#   voice (others < 19 GB) Whisper only
+#   none  (above)          nothing; Whisper stops too
+# "others" = total GPU memory in use minus llama-server and Whisper, from Windows' per-process GPU memory counters
+# (nvidia-smi can't report per-process memory under WDDM). Downgrades happen at once; upgrades only after others has
+# stayed vram.upgradeMarginMiB under the tier's limit for upgradeDelaySec and the bigger tier fits. voice.ps1 follows
+# gpu_released in state\status.json. state\override.txt (full|small|voice|none, or any tier name) pins a tier and
+# ignores VRAM until removed. Game/stream detection is only logged.
 # Runs at boot as the SYSTEM scheduled task "HomeLLM" (see install.ps1).
-param([switch]$DryRun)   # -DryRun: print detected game folders and the mode that would be chosen, then exit
+param([switch]$DryRun)   # -DryRun: print tiers, VRAM, detected game folders and the tier that would be chosen
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common.ps1"
@@ -15,17 +21,40 @@ $paths = Get-KitPaths
 New-Item -ItemType Directory -Force $paths.State, $paths.Logs | Out-Null
 
 $PollSeconds  = 5
-$Rank         = @{ game = 0; stream = 1; full = 2 }   # lower = smaller model
 $StreamFlag   = Join-Path $paths.State 'streaming.flag'
-$OverrideFile = Join-Path $paths.State 'override.txt'   # optional: full|stream|game (anything else = auto)
+$OverrideFile = Join-Path $paths.State 'override.txt'
 $StatusFile   = Join-Path $paths.State 'status.json'
 $ExtraGames   = Join-Path $paths.Root 'games.txt'
 $IgnoreFile   = Join-Path $paths.Root 'ignore.txt'
+$Margin       = $(if ($cfg.vram.upgradeMarginMiB) { [int]$cfg.vram.upgradeMarginMiB } else { 1536 })
+$Headroom     = $(if ($cfg.vram.headroomMiB) { [int]$cfg.vram.headroomMiB } else { 1024 })
 
 function Write-Log($msg) { Write-KitLog 'supervisor.log' $msg }
 
-function Get-ModeArgs($mode) {
-    $m = $cfg.llm.modes.$mode
+# Tiers from config (llm.tiers), or built from the older llm.modes format (full -> full, game -> small).
+function Get-TierConfig {
+    if ($cfg.llm.tiers) { return @($cfg.llm.tiers) }
+    $m = $cfg.llm.modes
+    @(
+        [pscustomobject]@{ name = 'full';  maxOthersMiB = 10240; whisper = $true;  model = $m.full },
+        [pscustomobject]@{ name = 'small'; maxOthersMiB = 16384; whisper = $true;  model = $(if ($m.game) { $m.game } else { $m.full }) },
+        [pscustomobject]@{ name = 'voice'; maxOthersMiB = 19456; whisper = $true;  model = $null },
+        [pscustomobject]@{ name = 'none';  maxOthersMiB = $null; whisper = $false; model = $null }
+    )
+}
+$Tiers = [ordered]@{}
+foreach ($t in Get-TierConfig) {
+    $file = $(if ($t.model) { Join-Path $paths.Models $t.model.file } else { $null })
+    # first-guess footprint: weights + ~25% for context/compute buffers; replaced by the measured value once loaded
+    $est = $(if ($file -and (Test-Path $file)) { [int]((Get-Item $file).Length / 1MB * 1.25) + 512 } else { 0 })
+    $Tiers[$t.name] = @{ Model = $t.model; Max = $(if ($t.maxOthersMiB) { [int]$t.maxOthersMiB } else { [int]::MaxValue })
+                         Whisper = [bool]$t.whisper -and [bool]$cfg.voice.enabled; EstLlm = $est }
+}
+$TierNames  = @($Tiers.Keys)
+$EstWhisper = 1500
+
+function Get-TierArgs($tier) {
+    $m = $Tiers[$tier].Model
     $a = @('-m', "`"$(Join-Path $paths.Models $m.file)`"",
            '--host', '0.0.0.0', '--port', "$($cfg.llm.port)", '--alias', $cfg.llm.alias) + @($cfg.llm.commonArgs)
     if ($m.ctx)                { $a += '-c', "$($m.ctx)" }
@@ -84,18 +113,58 @@ function Find-RunningGame($roots) {
     $null
 }
 
-function Get-DesiredMode($roots) {
-    if (Test-Path $OverrideFile) {
-        $o = (Get-Content $OverrideFile -Raw).Trim().ToLower()
-        if ($Rank.ContainsKey($o)) { return @($o, 'manual override') }
-    }
+# What the PC is doing, for the log and status only.
+function Get-Activity($roots) {
     $svc = Get-Service $cfg.apollo.serviceName -ErrorAction SilentlyContinue
-    if ((Test-Path $StreamFlag) -and ($null -eq $svc -or $svc.Status -eq 'Running')) {
-        return @('stream', 'stream active')
-    }
+    if ((Test-Path $StreamFlag) -and ($null -eq $svc -or $svc.Status -eq 'Running')) { return 'stream' }
     $game = Find-RunningGame $roots
-    if ($game) { return @('game', $game) }
-    @('full', 'idle')
+    if ($game) { return "game: $game" }
+    'idle'
+}
+
+function Get-Override {
+    if (-not (Test-Path $OverrideFile)) { return $null }
+    $o = "$(Get-Content $OverrideFile -Raw)".Trim().ToLower()   # an empty file means "auto", not an error
+    if ($o -in @('game', 'stream') -and $Tiers.Contains('small')) { return 'small' }   # older override names
+    if ($Tiers.Contains($o)) { return $o }
+    $null
+}
+
+# Total GPU memory in use, our own share (llama-server, Whisper) and the rest, in MiB; $null if unreadable.
+function Get-Vram {
+    try {
+        $smi = (& nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits) | Select-Object -First 1
+        $used, $total = $smi -split ',\s*' | ForEach-Object { [int]$_ }
+        $ours = @{}
+        Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $paths.Server } |
+            ForEach-Object { $ours[$_.Id] = 'llm' }
+        Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+            Where-Object { $_.CommandLine -match 'wyoming_faster_whisper' } | ForEach-Object { $ours[[int]$_.ProcessId] = 'whisper' }
+        $llm = 0; $whisper = 0
+        foreach ($s in (Get-Counter '\GPU Process Memory(*)\Dedicated Usage' -ErrorAction Stop).CounterSamples) {
+            if ($s.InstanceName -match '^pid_(\d+)_') {
+                $who = $ours[[int]$matches[1]]
+                if ($who -eq 'llm') { $llm += $s.CookedValue } elseif ($who -eq 'whisper') { $whisper += $s.CookedValue }
+            }
+        }
+        $llm = [int]($llm / 1MB); $whisper = [int]($whisper / 1MB)
+        @{ Used = $used; Total = $total; Llm = $llm; Whisper = $whisper; Others = [math]::Max(0, $used - $llm - $whisper) }
+    } catch { $null }
+}
+
+# Best tier the others' usage allows. A tier bigger than the current one also needs the margin and must fit.
+function Get-AllowedTier($vram, $current) {
+    $currentIdx = $TierNames.IndexOf($current)
+    if ($currentIdx -lt 0) { $currentIdx = $TierNames.Count }
+    for ($i = 0; $i -lt $TierNames.Count; $i++) {
+        $t = $Tiers[$TierNames[$i]]
+        if ($i -lt $currentIdx) {
+            $need = $(if ($t.Model) { $t.EstLlm } else { 0 }) + $(if ($t.Whisper) { $EstWhisper } else { 0 })
+            if ($vram.Others + $Margin -lt $t.Max -and $vram.Others + $need + $Headroom -le $vram.Total) { return $TierNames[$i] }
+        }
+        elseif ($vram.Others -lt $t.Max) { return $TierNames[$i] }
+    }
+    $TierNames[-1]
 }
 
 function Stop-Server {
@@ -105,48 +174,67 @@ function Stop-Server {
     }
 }
 
-function Start-Server($mode) {
-    Write-Log "starting $mode ($($cfg.llm.modes.$mode.file))"
-    Start-Process -FilePath $paths.Server -ArgumentList (Get-ModeArgs $mode) -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput (Join-Path $paths.Logs "server-$mode.out.log") `
-        -RedirectStandardError  (Join-Path $paths.Logs "server-$mode.err.log")
+function Start-Server($tier) {
+    if (-not $Tiers[$tier].Model) { return $null }
+    Write-Log "starting $tier ($($Tiers[$tier].Model.file))"
+    Start-Process -FilePath $paths.Server -ArgumentList (Get-TierArgs $tier) -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $paths.Logs "server-$tier.out.log") `
+        -RedirectStandardError  (Join-Path $paths.Logs "server-$tier.err.log")
 }
 
 function Test-SameServer($a, $b) {
-    (($cfg.llm.modes.$a.file) -eq ($cfg.llm.modes.$b.file)) -and ((Get-ModeArgs $a) -join ' ') -eq ((Get-ModeArgs $b) -join ' ')
+    $ma = $Tiers[$a].Model; $mb = $Tiers[$b].Model
+    $ma -and $mb -and ($ma.file -eq $mb.file) -and ((Get-TierArgs $a) -join ' ') -eq ((Get-TierArgs $b) -join ' ')
 }
 
 $roots = Get-GameRoots
 if ($DryRun) {
-    "game folders:"; $roots | ForEach-Object { "  $_" }
-    $d, $r = Get-DesiredMode $roots
-    "desired mode: $d ($r)"
-    foreach ($m in 'full', 'stream', 'game') { "$m args: $((Get-ModeArgs $m) -join ' ')" }
+    "tiers:"; foreach ($n in $TierNames) { $t = $Tiers[$n]
+        "  {0,-6} others < {1,-6} model {2} (~{3} MiB) whisper {4}" -f $n, $(if ($t.Max -eq [int]::MaxValue) { '-' } else { $t.Max }),
+            $(if ($t.Model) { $t.Model.file } else { '-' }), $t.EstLlm, $t.Whisper }
+    $v = Get-Vram
+    if ($v) { "VRAM: used $($v.Used) / $($v.Total) MiB; llama-server $($v.Llm), Whisper $($v.Whisper), others $($v.Others)"
+              "tier now: $(Get-AllowedTier $v 'none')" } else { 'VRAM: unreadable (nvidia-smi / GPU counters)' }
+    "activity: $(Get-Activity $roots)"; "game folders:"; $roots | ForEach-Object { "  $_" }
     return
 }
 
-Write-Log 'supervisor started'
+Write-Log 'supervisor started (VRAM tiers)'
 Write-Log "game folders: $($roots -join '; ')"
 Stop-Server
 $current = $null; $proc = $null; $since = Get-Date
-$upgradeFrom = $null; $failures = 0; $rootsAge = Get-Date
+$upgradeFrom = $null; $failures = 0; $rootsAge = Get-Date; $activity = 'idle'
 
 while ($true) {
     try {
         if (((Get-Date) - $rootsAge).TotalMinutes -ge 30) { $roots = Get-GameRoots; $rootsAge = Get-Date }
-        $desired, $reason = Get-DesiredMode $roots
+        $newActivity = Get-Activity $roots
+        if ($newActivity -ne $activity) { Write-Log "activity: $newActivity"; $activity = $newActivity }
 
+        $vram = Get-Vram
+        $override = Get-Override
+        if ($override) { $desired = $override; $reason = 'manual override' }
+        elseif ($null -eq $vram) { $desired = $(if ($current) { $current } else { $TierNames[0] }); $reason = 'VRAM unreadable, keeping tier' }
+        else { $desired = Get-AllowedTier $vram $current; $reason = "others $($vram.Others) MiB ($activity)" }
+
+        # learn real footprints once a tier has been loaded for a minute
+        if ($vram -and $current -and $Tiers[$current].Model -and $vram.Llm -gt 500 -and ((Get-Date) - $since).TotalSeconds -gt 60) {
+            $Tiers[$current].EstLlm = $vram.Llm
+        }
+        if ($vram -and $vram.Whisper -gt 300) { $EstWhisper = $vram.Whisper }
+
+        # Downgrade at once (the game needs the memory); upgrade only after it has been allowed for a while.
         $switch = $false
         if ($null -eq $current) { $switch = $true }
         elseif ($desired -ne $current) {
-            if ($Rank[$desired] -lt $Rank[$current] -or $reason -eq 'manual override') { $switch = $true }
+            if ($TierNames.IndexOf($desired) -gt $TierNames.IndexOf($current) -or $reason -eq 'manual override') { $switch = $true }
             elseif (-not $upgradeFrom) { $upgradeFrom = Get-Date }
             elseif (((Get-Date) - $upgradeFrom).TotalSeconds -ge $cfg.llm.upgradeDelaySec) { $switch = $true }
         }
         if ($desired -eq $current -or $switch) { $upgradeFrom = $null }
 
         if ($switch) {
-            Write-Log "mode $current -> $desired ($reason)"
+            Write-Log "tier $current -> $desired ($reason)"
             if (-not ($current -and $proc -and -not $proc.HasExited -and (Test-SameServer $current $desired))) {
                 Stop-Server
                 $proc = Start-Server $desired
@@ -160,7 +248,9 @@ while ($true) {
             $proc = Start-Server $current
         }
 
-        @{ mode = $current; model = $cfg.llm.modes.$current.file; reason = $reason; since = $since.ToString('o')
+        @{ mode = $current; tier = $current; model = $(if ($Tiers[$current].Model) { $Tiers[$current].Model.file } else { $null })
+           reason = $reason; activity = $activity; since = $since.ToString('o'); gpu_released = -not $Tiers[$current].Whisper
+           vram_used = $(if ($vram) { $vram.Used } else { $null }); vram_others = $(if ($vram) { $vram.Others } else { $null })
            pending = $(if ($upgradeFrom) { $desired } else { $null }) } | ConvertTo-Json | Set-Content $StatusFile
     }
     catch { Write-Log "error: $_" }

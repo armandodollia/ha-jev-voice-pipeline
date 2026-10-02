@@ -149,8 +149,12 @@ $apolloConf = $cfg.apollo.confPath
 $useApollo = -not $SkipApollo -and (($cfg.apollo.enabled -eq $true) -or ($cfg.apollo.enabled -eq 'auto' -and (Test-Path $apolloConf)))
 if ($useApollo) { Ok "Apollo/Sunshine config: $apolloConf" } else { Warn 'Apollo/Sunshine not configured; stream mode must be triggered manually (state\override.txt).' }
 
-$modelFiles = @($cfg.llm.modes.PSObject.Properties | ForEach-Object { $_.Value } | Sort-Object file -Unique)
-Write-Host "`n    Modes:" ; foreach ($p in $cfg.llm.modes.PSObject.Properties) { Write-Host ("      {0,-7} {1}" -f $p.Name, $p.Value.file) }
+if ($cfg.llm.tiers) { $tierModels = @($cfg.llm.tiers | Where-Object { $_.model } | ForEach-Object { $_.model }) }
+else { $tierModels = @($cfg.llm.modes.PSObject.Properties | ForEach-Object { $_.Value }) }   # older config format
+$modelFiles = @($tierModels | Sort-Object file -Unique)
+Write-Host "`n    VRAM tiers:"
+if ($cfg.llm.tiers) { foreach ($t in $cfg.llm.tiers) { Write-Host ("      {0,-6} others < {1,-6} {2}" -f $t.name, $(if ($t.maxOthersMiB) { $t.maxOthersMiB } else { '-' }), $(if ($t.model) { $t.model.file } else { '(no LLM)' })) } }
+else { foreach ($p in $cfg.llm.modes.PSObject.Properties) { Write-Host ("      {0,-7} {1}" -f $p.Name, $p.Value.file) } }
 
 if ($CheckOnly) { Write-Host "`nCheck only: nothing was changed." ; return }
 if ($needBuild -and (-not $vs -or -not $cuda)) { throw 'Missing build prerequisites (see above).' }

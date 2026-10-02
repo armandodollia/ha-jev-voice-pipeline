@@ -7,30 +7,31 @@
     "cudaArch": "89",
     "fork": { "repo": "thecodacus/llama.cpp", "branch": "parallel-decision" },
     "upgradeDelaySec": 90,
+    "_upgradeDelaySec": "others must stay vram.upgradeMarginMiB under a bigger tier's limit this long before it loads",
     "commonArgs": ["-ngl", "99", "-fa", "on", "--jinja", "--parallel", "1", "-ctk", "q8_0", "-ctv", "q8_0", "--no-webui"],
-    "modes": {
-      "full": {
-        "_when": "PC idle",
-        "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
-        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
-      },
-      "stream": {
-        "_when": "Apollo/Sunshine stream active",
-        "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
-        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
-      },
-      "game": {
-        "_when": "a game is running locally",
-        "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
-        "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false }
-      }
-    }
+    "_tiers": "Best first. A tier is used while other programs (games, stream encoder, training jobs) use less GPU memory than maxOthersMiB. whisper=false also stops speech-to-text.",
+    "tiers": [
+      { "name": "full",  "maxOthersMiB": 10240, "whisper": true,
+        "model": { "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf",
+          "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false } } },
+      { "name": "small", "maxOthersMiB": 16384, "whisper": true,
+        "model": { "repo": "unsloth/Qwen3.5-4B-GGUF", "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+          "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false } } },
+      { "name": "voice", "maxOthersMiB": 19456, "whisper": true },
+      { "name": "none",  "whisper": false }
+    ]
+  },
+
+  "vram": {
+    "upgradeMarginMiB": 1536,
+    "headroomMiB": 1024
   },
 
   "voice": {
     "enabled": true,
     "python": "",
     "whisperModel": "large-v3-turbo",
+    "computeType": "int8_float16",
     "language": "en",
     "piperVoice": "en_US-hfc_female-medium",
     "endpointingSec": 0.8,

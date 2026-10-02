@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-  Shows the current model mode, service health and recent log lines.
-  .\status.ps1 -Mode game|stream|full|auto   forces a mode (auto = back to automatic switching).
+  Shows the current VRAM tier, service health and recent log lines.
+  .\status.ps1 -Mode full|small|voice|none|auto   pins a tier (auto = back to automatic VRAM tiers).
+  Pin a tier while long GPU jobs need the LLM to stay put (e.g. a teacher model for training data).
 #>
-param([ValidateSet('full', 'stream', 'game', 'auto')][string]$Mode)
+param([string]$Mode)
 . "$PSScriptRoot\scripts\common.ps1"
 $paths = Get-KitPaths
 $cfg = Read-KitConfig
@@ -11,13 +12,14 @@ $cfg = Read-KitConfig
 if ($Mode) {
     $override = Join-Path $paths.State 'override.txt'
     if ($Mode -eq 'auto') { Remove-Item $override -ErrorAction SilentlyContinue } else { Set-Content $override $Mode }
-    Write-Host "mode set to $Mode (takes effect within ~5 s)"
+    Write-Host "tier set to $Mode (takes effect within ~5 s)"
 }
 
 $statusFile = Join-Path $paths.State 'status.json'
 if (Test-Path $statusFile) {
     $s = Get-Content $statusFile -Raw | ConvertFrom-Json
-    Write-Host ("mode:   {0}  ({1})`nmodel:  {2}`nsince:  {3}" -f $s.mode, $s.reason, $s.model, $s.since)
+    Write-Host ("tier:   {0}  ({1})`nmodel:  {2}`nsince:  {3}`nVRAM:   {4} MiB used, {5} MiB by other programs; activity: {6}" -f `
+        $s.tier, $s.reason, $s.model, $s.since, $s.vram_used, $s.vram_others, $s.activity)
     if ($s.pending) { Write-Host "pending: switching to $($s.pending) after the upgrade delay" }
 } else { Write-Host 'supervisor has not written a status yet' }
 

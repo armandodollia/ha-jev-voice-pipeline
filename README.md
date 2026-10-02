@@ -1,28 +1,31 @@
 # Home LLM GPU kit
 
 Run a local LLM and voice stack for Home Assistant on a Windows gaming PC with an NVIDIA GPU, and use it from
-Home Assistant's Assist and from a Pebble watch, at home or away (over Tailscale). The model shrinks
-automatically while you game or stream, so the GPU stays usable.
+Home Assistant's Assist and from a Pebble watch, at home or away (over Tailscale). The model steps down
+automatically as games, streams or other GPU jobs need video memory, so the GPU stays usable.
 
 | Piece | What it does | Port |
 |---|---|---|
 | **llama-server** ([thecodacus/llama.cpp `parallel-decision`](https://github.com/thecodacus/llama.cpp/tree/parallel-decision)) | OpenAI-compatible chat API with tool calling for Assist, plus Jev-mode `POST /v1/decision` (answers enum/boolean questions in one forward pass, with probabilities) | 8080 |
-| **Model switching supervisor** | Keeps one model loaded under a fixed name (`home`) and swaps it by what the PC is doing | – |
+| **VRAM tier supervisor** | Keeps one model loaded under a fixed name (`home`) and steps it down, or unloads it and Whisper, as other programs need GPU memory | – |
 | **Whisper** (Wyoming, GPU) | Speech-to-text for Assist, biased toward your Home Assistant device names | 10300 |
 | **Piper** (Wyoming, CPU) | Text-to-speech for Assist | 10200 |
 | **Speech API** | OpenAI-style `/v1/audio/transcriptions` + `/v1/audio/speech` in front of Whisper/Piper, for the watch | 10310 |
 | **Assist relay** | Runs Home Assistant `/api/conversation/process` calls and OpenAI `/v1/chat/completions` calls through your **Assist pipeline**, for apps that can't choose an agent (Wristotle's HA commands and Ask Agent) | 10320 (localhost) |
 
-Default modes (edit in `config.json`):
+Default VRAM tiers (edit `llm.tiers` in `config.json`). "Other programs" means everything on the GPU except
+the kit's own llama-server and Whisper: games, the stream encoder, the desktop, training jobs.
 
-| Mode | When | Model | VRAM (measured, RTX 4090) |
+| Tier | Other programs use | Runs | VRAM (measured, RTX 4090) |
 |---|---|---|---|
-| `full` | idle | Gemma 4 12B UD-Q4_K_XL | ~10 GB |
-| `stream` | Apollo/Sunshine stream running | Gemma 4 12B (same model, no reload) | ~10 GB |
-| `game` | a game is running locally | Qwen3.5 4B UD-Q4_K_XL | ~4.2 GB |
+| `full` | under 10 GB | Gemma 4 12B UD-Q4_K_XL + Whisper | ~10 GB + ~1.4 GB |
+| `small` | 10–16 GB | Qwen3.5 4B UD-Q4_K_XL + Whisper | ~5 GB + ~1.4 GB |
+| `voice` | 16–19 GB | Whisper only (no LLM) | ~1.4 GB |
+| `none` | 19 GB or more | nothing | 0 |
 
-Whisper large-v3-turbo adds ~2.5 GB and stays loaded. Smaller models load immediately; bigger ones wait until
-the game/stream has been gone for 90 s. A swap interrupts the LLM for ~2–6 s.
+The supervisor reads each process's GPU memory from Windows' performance counters every 5 s. It steps down at
+once, and steps up only after other programs have stayed 1.5 GB under the tier's limit for 90 s and the bigger
+tier fits. A swap interrupts the LLM for ~2–6 s. Whisper runs as `int8_float16` (`voice.computeType`).
 
 Inspired by Codacus' video [*Can You Run Any LLM in Jev Mode Using llama.cpp?*](https://www.youtube.com/watch?v=bcGO7xre46o).
 
@@ -77,8 +80,8 @@ entity/area names, which fixes most misheard device names.
 Day to day:
 
 ```powershell
-.\status.ps1              # mode, service health, tailnet URLs, recent switches
-.\status.ps1 -Mode game   # force a mode; -Mode auto returns to automatic switching
+.\status.ps1              # tier, VRAM, service health, tailnet URLs, recent switches
+.\status.ps1 -Mode full   # pin a tier (full|small|voice|none); -Mode auto returns to automatic tiers
 .\uninstall.ps1           # remove tasks, firewall rules, hooks, tailnet publishing (keeps files)
 ```
 
@@ -89,9 +92,12 @@ Give the PC a **DHCP reservation** in your router so its LAN address doesn't cha
 | Setting | Default | Notes |
 |---|---|---|
 | `homeAssistant.url` | `http://homeassistant.local:8123` | LAN address of HA (used by Whisper name hints and the Assist relay) |
-| `llm.modes.<mode>.repo/file` | Gemma 4 12B / Qwen3.5 4B | any GGUF on Hugging Face; `ctx`, `decisionSeqs`, `chatTemplateKwargs`, `extraArgs` per mode |
-| `llm.modes.<mode>.chatTemplateKwargs` | `{"enable_thinking": false}` | keep thinking off for voice (thinking makes replies ~4x slower) |
-| `llm.upgradeDelaySec` | 90 | wait before loading a bigger model again |
+| `llm.tiers[]` | full / small / voice / none | best first: `name`, `maxOthersMiB` (tier allowed while other programs use less), `whisper`, optional `model` |
+| `llm.tiers[].model.repo/file` | Gemma 4 12B / Qwen3.5 4B | any GGUF on Hugging Face; `ctx`, `decisionSeqs`, `chatTemplateKwargs`, `extraArgs` per model |
+| `llm.tiers[].model.chatTemplateKwargs` | `{"enable_thinking": false}` | keep thinking off for voice (thinking makes replies ~4x slower) |
+| `llm.upgradeDelaySec` | 90 | how long other programs' usage must stay low before a bigger tier loads |
+| `vram.upgradeMarginMiB` / `headroomMiB` | 1536 / 1024 | upgrade only this far under a tier's limit / keep this much free |
+| `voice.computeType` | `int8_float16` | Whisper precision (`float16` uses about twice the VRAM) |
 | `llm.cudaArch` | 89 | GPU generation for the build |
 | `voice.whisperModel` / `language` | `large-v3-turbo` / `en` | |
 | `voice.piperVoice` | `en_US-hfc_female-medium` | any [Piper voice](https://huggingface.co/rhasspy/piper-voices) |
@@ -317,13 +323,39 @@ Home Assistant's reply.
 
 ---
 
-## Game detection
+## Long GPU jobs (training, teacher models)
 
-A game counts as running when Steam reports a running app, or when a process runs from a Steam library,
-`C:\Program Files\Epic Games`, `C:\Program Files\EA Games`, Ubisoft's `games` folder or `C:\XboxGames`.
+The tiers treat **any** other GPU program as a game, including your own training runs. The supervisor never stops
+those; it only steps its own model down. That matters when a job uses the LLM itself, for example as a **teacher**
+that writes training data through `home`:
+
+| The job uses | What happens to `home` |
+|---|---|
+| over ~10 GB | Gemma is swapped for the 4B model. Requests keep working but get 4B answers, which can silently lower the quality of generated data |
+| over ~16 GB | no LLM: teacher requests fail |
+| over ~19 GB | Whisper stops too |
+
+Pin the tier while such a job runs, and unpin it afterwards:
+
+```powershell
+.\status.ps1 -Mode full    # pin Gemma + Whisper; VRAM is ignored until you unpin
+.\status.ps1 -Mode auto    # back to automatic tiers
+```
+
+While pinned, fitting everything in VRAM is up to you. On a 24 GB card: Gemma ~10 GB + Whisper ~1.4 GB +
+desktop/encoder ~1–2 GB leaves **~11 GB for the job**. A job that needs more runs out of memory instead of the
+LLM stepping aside; generate the data first, then train. Data generators can also watch `state\status.json` and
+pause while `tier` isn't `full` (for example before each batch), so they never mix answers from a smaller model
+into a dataset.
+
+## Activity detection
+
+Games and streams no longer pick the model (VRAM does), but they're still detected and shown in `status.ps1` and
+`supervisor.log`. A game counts as running when Steam reports a running app, or when a process runs from a Steam
+library, `C:\Program Files\Epic Games`, `C:\Program Files\EA Games`, Ubisoft's `games` folder or `C:\XboxGames`.
 Add other games (e.g. Battle.net) by exe name to `games.txt`; exclude false positives (Wallpaper Engine is already
-excluded) in `ignore.txt`. Stream mode comes from an Apollo/Sunshine prep command the installer adds (existing
-prep commands are kept; a backup is written next to the config).
+excluded) in `ignore.txt`. Streams come from an Apollo/Sunshine prep command the installer adds (existing prep
+commands are kept; a backup is written next to the config).
 
 ## Security notes
 
@@ -344,12 +376,13 @@ prep commands are kept; a backup is written next to the config).
 | Whisper hears "We'll be right back." from silence | Old config; the kit runs Whisper with `--vad-filter`. |
 | Device names misheard | Set a token (3.1) so Whisper gets name hints; add aliases; the first command after a restart may miss the hints. |
 | Piper exits right after "Ready" | An upgrade undid the Windows patch: `voice\tts\Scripts\python.exe scripts\patch_piper.py`. |
-| Stuck in game mode | `.\status.ps1` shows what triggered it; add the exe to `ignore.txt`. |
+| Stuck on a small tier | `.\status.ps1` shows how much VRAM other programs use; close what holds it, or pin with `-Mode full`. A leftover `state\override.txt` also pins a tier. |
+| A training job's teacher got worse or failed | The job's VRAM pushed the tier down; pin it during the job (see *Long GPU jobs*). |
 | Wristotle "network failure" | Use the `https://….ts.net` URLs, check Tailscale is connected on the phone, turn off Private DNS. |
 | Wristotle "access token rejected" | Wrong token, or created by a different user. |
 | `tailscale serve` failed | Enable MagicDNS and HTTPS certificates in the Tailscale admin console, then re-run the installer. |
 
-Logs (`logs\`): `supervisor.log` (mode switches), `server-<mode>.err.log` (llama-server), `voice.log`,
+Logs (`logs\`): `supervisor.log` (tier switches, activity), `server-<tier>.err.log` (llama-server), `voice.log`,
 `whisper.err.log`, `piper.err.log`, `speechApi.err.log`, `haRelay.err.log`.
 
 ## Layout
@@ -358,7 +391,7 @@ Logs (`logs\`): `supervisor.log` (mode switches), `server-<mode>.err.log` (llama
 install.ps1 / uninstall.ps1 / status.ps1
 config.example.json        -> config.json (your settings)
 games.txt, ignore.txt      game detection lists
-scripts\homellm.ps1        model-switching supervisor (task HomeLLM)
+scripts\homellm.ps1        VRAM tier supervisor (task HomeLLM)
 scripts\voice.ps1          voice supervisor (task HomeVoice)
 scripts\speech_api.py      OpenAI-style speech API (watch STT/TTS)
 scripts\ha_relay.py        Assist pipeline relay (watch commands)

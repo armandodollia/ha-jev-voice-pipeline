@@ -3,6 +3,8 @@
 #   piper     Wyoming Piper on the CPU (text-to-speech)
 #   speechApi OpenAI-style /v1/audio/transcriptions + /v1/audio/speech in front of both (for apps like Wristotle)
 #   haRelay   runs /api/conversation/process requests through HA's Assist pipeline (localhost only)
+# Whisper is stopped while the supervisor has released the GPU (gpu_released in state\status.json, its "none" tier)
+# and started again when it isn't.
 # Runs at boot as the SYSTEM scheduled task "HomeVoice" (see install.ps1).
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common.ps1"
@@ -26,7 +28,7 @@ $env:HF_HOME = Join-Path $Data 'hf'
 $haUrl     = $cfg.homeAssistant.url.TrimEnd('/')
 $tokenFile = Join-Path $paths.Root $cfg.homeAssistant.tokenFile
 $whisperArgs = @('-m', 'wyoming_faster_whisper', '--model', $v.whisperModel, '--language', $v.language,
-                 '--device', 'cuda', '--compute-type', 'float16', '--beam-size', '5',
+                 '--device', 'cuda', '--compute-type', $(if ($v.computeType) { $v.computeType } else { 'int8_float16' }), '--beam-size', '5',
                  '--uri', "tcp://0.0.0.0:$($v.ports.wyomingStt)", '--data-dir', "`"$Data`"", '--download-dir', "`"$Data`"",
                  '--vad-clip', '--vad-filter')      # trim edges; drop non-speech so silence can't hallucinate text
 if ($v.endpointingSec) { $whisperArgs += '--vad-endpointing', "$($v.endpointingSec)" }
@@ -58,10 +60,35 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -match 'wyoming_(faster_whisper|piper)|speech_api\.py|ha_relay\.py' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
+# True while the supervisor has released the GPU to other programs.
+$StatusFile = Join-Path $paths.State 'status.json'
+function Test-GpuReleased {
+    try { [bool](Get-Content $StatusFile -Raw | ConvertFrom-Json).gpu_released } catch { $false }
+}
+
 $procs = @{}; $fails = @{}
-foreach ($n in $Services.Keys) { $procs[$n] = Start-Voice $n; $fails[$n] = 0 }
+$paused = Test-GpuReleased
+foreach ($n in $Services.Keys) {
+    $fails[$n] = 0
+    if ($n -eq 'whisper' -and $paused) { Write-KitLog 'voice.log' 'whisper paused (GPU released)'; $procs[$n] = $null; continue }
+    $procs[$n] = Start-Voice $n
+}
 while ($true) {
+    $released = Test-GpuReleased
+    if ($released -and -not $paused) {
+        Write-KitLog 'voice.log' 'whisper paused (GPU released)'
+        if ($procs['whisper'] -and -not $procs['whisper'].HasExited) {
+            Stop-Process -Id $procs['whisper'].Id -Force -ErrorAction SilentlyContinue
+            $procs['whisper'].WaitForExit(15000) | Out-Null
+        }
+        $procs['whisper'] = $null; $paused = $true
+    }
+    elseif (-not $released -and $paused) {
+        Write-KitLog 'voice.log' 'whisper resumed'
+        $procs['whisper'] = Start-Voice 'whisper'; $fails['whisper'] = 0; $paused = $false
+    }
     foreach ($n in $Services.Keys) {
+        if (-not $procs[$n]) { continue }
         if ($procs[$n].HasExited) {
             $fails[$n]++
             Write-KitLog 'voice.log' "$n exited with code $($procs[$n].ExitCode) (failure $($fails[$n]))"
