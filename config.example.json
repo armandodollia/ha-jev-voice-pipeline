@@ -8,6 +8,10 @@
     "fork": { "repo": "thecodacus/llama.cpp", "branch": "parallel-decision" },
     "upgradeDelaySec": 90,
     "_upgradeDelaySec": "others must stay vram.upgradeMarginMiB under a bigger tier's limit this long before it loads",
+    "downgradeLoadDelaySec": 60,
+    "_downgradeLoadDelaySec": "outside games: after a downgrade unloads the bigger model, wait this long before loading the smaller one",
+    "noLoadsDuringActivity": true,
+    "_noLoadsDuringActivity": "while a game/stream runs, only unload: model loads, upgrades and crash restarts wait until it ends (loading mid-game caused GPU driver resets)",
     "commonArgs": ["-ngl", "99", "-fa", "on", "--jinja", "--parallel", "1", "-ctk", "q8_0", "-ctv", "q8_0", "--no-webui"],
     "_tiers": "Best first. A tier is used while other programs (games, stream encoder, training jobs) use less GPU memory than maxOthersMiB. whisper=false also stops speech-to-text.",
     "tiers": [

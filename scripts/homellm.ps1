@@ -10,7 +10,11 @@
 # (nvidia-smi can't report per-process memory under WDDM). Downgrades happen at once; upgrades only after others has
 # stayed vram.upgradeMarginMiB under the tier's limit for upgradeDelaySec and the bigger tier fits. voice.ps1 follows
 # gpu_released in state\status.json. state\override.txt (full|small|voice|none, or any tier name) pins a tier and
-# ignores VRAM until removed. Game/stream detection is only logged.
+# ignores VRAM until removed.
+# While a game or stream runs (llm.noLoadsDuringActivity, default on), no model is ever STARTED: unloads still happen
+# at once, but the smaller tier's model, upgrades and crash restarts wait until the activity ends. Loading a model
+# mid-game triggered GPU driver resets (TDR) on an RTX 4090 9-16 s after the load began. Outside games, a downgrade
+# unloads at once and loads the smaller model llm.downgradeLoadDelaySec later.
 # Runs at boot as the SYSTEM scheduled task "HomeLLM" (see install.ps1).
 param([switch]$DryRun)   # -DryRun: print tiers, VRAM, detected game folders and the tier that would be chosen
 
@@ -28,6 +32,8 @@ $ExtraGames   = Join-Path $paths.Root 'games.txt'
 $IgnoreFile   = Join-Path $paths.Root 'ignore.txt'
 $Margin       = $(if ($cfg.vram.upgradeMarginMiB) { [int]$cfg.vram.upgradeMarginMiB } else { 1536 })
 $Headroom     = $(if ($cfg.vram.headroomMiB) { [int]$cfg.vram.headroomMiB } else { 1024 })
+$LoadDelay    = $(if ($null -ne $cfg.llm.downgradeLoadDelaySec) { [int]$cfg.llm.downgradeLoadDelaySec } else { 60 })
+$NoBusyLoads  = $(if ($null -ne $cfg.llm.noLoadsDuringActivity) { [bool]$cfg.llm.noLoadsDuringActivity } else { $true })
 
 function Write-Log($msg) { Write-KitLog 'supervisor.log' $msg }
 
@@ -204,6 +210,8 @@ Write-Log "game folders: $($roots -join '; ')"
 Stop-Server
 $current = $null; $proc = $null; $since = Get-Date
 $upgradeFrom = $null; $failures = 0; $rootsAge = Get-Date; $activity = 'idle'
+$startAt    = $null   # delayed model start after a downgrade
+$deferStart = $false  # model start postponed until the game/stream ends
 
 while ($true) {
     try {
@@ -224,8 +232,13 @@ while ($true) {
         if ($vram -and $vram.Whisper -gt 300) { $EstWhisper = $vram.Whisper }
 
         # Downgrade at once (the game needs the memory); upgrade only after it has been allowed for a while.
+        $busy = $NoBusyLoads -and $activity -ne 'idle'
+        $manual = $reason -eq 'manual override'
         $switch = $false
         if ($null -eq $current) { $switch = $true }
+        elseif ($desired -ne $current -and $busy -and -not $manual -and $TierNames.IndexOf($desired) -lt $TierNames.IndexOf($current)) {
+            $upgradeFrom = $null   # no upgrades (= model starts) while a game/stream runs
+        }
         elseif ($desired -ne $current) {
             if ($TierNames.IndexOf($desired) -gt $TierNames.IndexOf($current) -or $reason -eq 'manual override') { $switch = $true }
             elseif (-not $upgradeFrom) { $upgradeFrom = Get-Date }
@@ -235,11 +248,33 @@ while ($true) {
 
         if ($switch) {
             Write-Log "tier $current -> $desired ($reason)"
+            $startAt = $null; $deferStart = $false
+            $isDowngrade = $current -and $TierNames.IndexOf($desired) -gt $TierNames.IndexOf($current)
             if (-not ($current -and $proc -and -not $proc.HasExited -and (Test-SameServer $current $desired))) {
-                Stop-Server
-                $proc = Start-Server $desired
+                Stop-Server; $proc = $null
+                $hasModel = [bool]$Tiers[$desired].Model
+                if ($hasModel -and -not $manual -and $busy) {
+                    $deferStart = $true
+                    Write-Log "$desired model loads after the $activity ends"
+                } elseif ($hasModel -and -not $manual -and $isDowngrade -and $LoadDelay -gt 0) {
+                    $startAt = (Get-Date).AddSeconds($LoadDelay)
+                    Write-Log "unloaded; $desired model loads in $LoadDelay s"
+                } else { $proc = Start-Server $desired }
             }
             $current = $desired; $since = Get-Date; $failures = 0
+        }
+        elseif ($deferStart -and -not $busy) {
+            $deferStart = $false
+            if ($Tiers[$current].Model) { Write-Log "activity idle: loading the $current model"; $proc = Start-Server $current }
+        }
+        elseif ($startAt -and (Get-Date) -ge $startAt) {
+            $startAt = $null
+            if ($busy) { $deferStart = $true; Write-Log "activity started: $current model waits until it ends" }
+            elseif ($Tiers[$current].Model) { $proc = Start-Server $current }
+        }
+        elseif ($proc -and $proc.HasExited -and $busy) {
+            Write-Log "server exited with code $($proc.ExitCode) during $activity; restarting after it ends"
+            $proc = $null; $deferStart = $true
         }
         elseif ($proc -and $proc.HasExited) {
             $failures++

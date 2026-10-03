@@ -27,6 +27,12 @@ The supervisor reads each process's GPU memory from Windows' performance counter
 once, and steps up only after other programs have stayed 1.5 GB under the tier's limit for 90 s and the bigger
 tier fits. A swap interrupts the LLM for ~2–6 s. Whisper runs as `int8_float16` (`voice.computeType`).
 
+**No model loads while a game or stream runs.** During a game the supervisor only unloads. The smaller tier's
+model, upgrades and crash restarts of llama-server or Whisper all wait until the game or stream ends. On an
+RTX 4090, loading a model mid-game caused GPU driver resets (TDR) 9–16 s after the load started. Outside games, a
+downgrade unloads at once and loads the smaller model 60 s later (`llm.downgradeLoadDelaySec`). Turn this off with
+`llm.noLoadsDuringActivity: false`.
+
 Inspired by Codacus' video [*Can You Run Any LLM in Jev Mode Using llama.cpp?*](https://www.youtube.com/watch?v=bcGO7xre46o).
 
 ---
@@ -96,6 +102,8 @@ Give the PC a **DHCP reservation** in your router so its LAN address doesn't cha
 | `llm.tiers[].model.repo/file` | Gemma 4 12B / Qwen3.5 4B | any GGUF on Hugging Face; `ctx`, `decisionSeqs`, `chatTemplateKwargs`, `extraArgs` per model |
 | `llm.tiers[].model.chatTemplateKwargs` | `{"enable_thinking": false}` | keep thinking off for voice (thinking makes replies ~4x slower) |
 | `llm.upgradeDelaySec` | 90 | how long other programs' usage must stay low before a bigger tier loads |
+| `llm.downgradeLoadDelaySec` | 60 | outside games: wait this long after a downgrade's unload before loading the smaller model |
+| `llm.noLoadsDuringActivity` | true | while a game/stream runs, only unload; loads, upgrades and crash restarts wait until it ends |
 | `vram.upgradeMarginMiB` / `headroomMiB` | 1536 / 1024 | upgrade only this far under a tier's limit / keep this much free |
 | `voice.computeType` | `int8_float16` | Whisper precision (`float16` uses about twice the VRAM) |
 | `llm.cudaArch` | 89 | GPU generation for the build |
@@ -350,8 +358,8 @@ into a dataset.
 
 ## Activity detection
 
-Games and streams no longer pick the model (VRAM does), but they're still detected and shown in `status.ps1` and
-`supervisor.log`. A game counts as running when Steam reports a running app, or when a process runs from a Steam
+Games and streams no longer pick the model (VRAM does). They're detected to hold back model loads while they run
+(see above), and they're shown in `status.ps1` and `supervisor.log`. A game counts as running when Steam reports a running app, or when a process runs from a Steam
 library, `C:\Program Files\Epic Games`, `C:\Program Files\EA Games`, Ubisoft's `games` folder or `C:\XboxGames`.
 Add other games (e.g. Battle.net) by exe name to `games.txt`; exclude false positives (Wallpaper Engine is already
 excluded) in `ignore.txt`. Streams come from an Apollo/Sunshine prep command the installer adds (existing prep

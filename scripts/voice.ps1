@@ -65,6 +65,11 @@ $StatusFile = Join-Path $paths.State 'status.json'
 function Test-GpuReleased {
     try { [bool](Get-Content $StatusFile -Raw | ConvertFrom-Json).gpu_released } catch { $false }
 }
+# True while a game/stream runs (status.json activity): a crashed Whisper is restarted only after it ends, because
+# starting a CUDA model mid-game can trigger a GPU driver reset.
+function Test-GameActive {
+    try { "$((Get-Content $StatusFile -Raw | ConvertFrom-Json).activity)" -notin @('', 'idle') } catch { $false }
+}
 
 $procs = @{}; $fails = @{}
 $paused = Test-GpuReleased
@@ -89,6 +94,7 @@ while ($true) {
     }
     foreach ($n in $Services.Keys) {
         if (-not $procs[$n]) { continue }
+        if ($procs[$n].HasExited -and $n -eq 'whisper' -and $cfg.llm.noLoadsDuringActivity -ne $false -and (Test-GameActive)) { continue }
         if ($procs[$n].HasExited) {
             $fails[$n]++
             Write-KitLog 'voice.log' "$n exited with code $($procs[$n].ExitCode) (failure $($fails[$n]))"
