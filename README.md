@@ -19,8 +19,8 @@ the kit's own llama-server and Whisper: games, the stream encoder, the desktop, 
 | Tier | Other programs use | Runs | VRAM (measured, RTX 4090) |
 |---|---|---|---|
 | `full` | under 10 GB | Gemma 4 12B UD-Q4_K_XL + Whisper | ~10 GB + ~1.4 GB |
-| `small` | 10–16 GB | Qwen3.5 4B UD-Q4_K_XL + Whisper | ~5 GB + ~1.4 GB |
-| `voice` | 16–19 GB | Whisper only (no LLM) | ~1.4 GB |
+| `small` | 10–14.5 GB | Qwen3.5 4B UD-Q4_K_XL + Whisper | ~5 GB + ~1.4 GB |
+| `voice` | 14.5–19 GB | Whisper only (no LLM) | ~1.4 GB |
 | `none` | 19 GB or more | nothing | 0 |
 
 The supervisor reads each process's GPU memory from Windows' performance counters every 5 s. It steps down at
@@ -32,6 +32,17 @@ model, upgrades and crash restarts of llama-server or Whisper all wait until the
 RTX 4090, loading a model mid-game caused GPU driver resets (TDR) 9–16 s after the load started. Outside games, a
 downgrade unloads at once and loads the smaller model 60 s later (`llm.downgradeLoadDelaySec`). Turn this off with
 `llm.noLoadsDuringActivity: false`.
+
+**Picking the limits.** A tier's limit = card VRAM − what that tier uses − a safety margin. The margin is free memory
+a game can grow into in the seconds before the supervisor notices and unloads. Running out doesn't crash the game:
+Windows pages the overflow to system RAM, which shows up as stutter and low-detail textures. The defaults leave
+about 3 GB at each limit on a 24 GB card (full: 24 − 11.4 − 10 ≈ 2.6 GB; small: 24 − 6.4 − 14.5 ≈ 3 GB;
+voice: 24 − 1.4 − 19 ≈ 3.6 GB). Scale them down for smaller cards.
+
+**Game start.** Many games size their texture pool from the VRAM free *at launch* and don't grow it later. So when
+a game or stream starts, the supervisor drops at once to `llm.activityMaxTier` (default `small`). With
+`noLoadsDuringActivity` on, that means Gemma unloads and nothing loads until the game ends, so the game launches
+with the memory free. While it runs, VRAM is checked every `llm.activityPollSec` (2 s) instead of every 5 s.
 
 Inspired by Codacus' video [*Can You Run Any LLM in Jev Mode Using llama.cpp?*](https://www.youtube.com/watch?v=bcGO7xre46o).
 
@@ -104,6 +115,8 @@ Give the PC a **DHCP reservation** in your router so its LAN address doesn't cha
 | `llm.upgradeDelaySec` | 90 | how long other programs' usage must stay low before a bigger tier loads |
 | `llm.downgradeLoadDelaySec` | 60 | outside games: wait this long after a downgrade's unload before loading the smaller model |
 | `llm.noLoadsDuringActivity` | true | while a game/stream runs, only unload; loads, upgrades and crash restarts wait until it ends |
+| `llm.activityMaxTier` | `small` | best tier allowed while a game/stream runs, applied as it starts (`""` = no cap) |
+| `llm.activityPollSec` | 2 | VRAM check interval while a game/stream runs |
 | `vram.upgradeMarginMiB` / `headroomMiB` | 1536 / 1024 | upgrade only this far under a tier's limit / keep this much free |
 | `voice.computeType` | `int8_float16` | Whisper precision (`float16` uses about twice the VRAM) |
 | `llm.cudaArch` | 89 | GPU generation for the build |

@@ -3,14 +3,16 @@
 # desktop, other GPU jobs). Tiers come from config.json llm.tiers, best first; a tier is allowed while others stays
 # below its maxOthersMiB. Defaults:
 #   full  (others < 10 GB) Gemma 4 12B + Whisper
-#   small (others < 16 GB) Qwen3.5 4B + Whisper
+#   small (others < 14.5 GB) Qwen3.5 4B + Whisper
 #   voice (others < 19 GB) Whisper only
 #   none  (above)          nothing; Whisper stops too
 # "others" = total GPU memory in use minus llama-server and Whisper, from Windows' per-process GPU memory counters
 # (nvidia-smi can't report per-process memory under WDDM). Downgrades happen at once; upgrades only after others has
 # stayed vram.upgradeMarginMiB under the tier's limit for upgradeDelaySec and the bigger tier fits. voice.ps1 follows
 # gpu_released in state\status.json. state\override.txt (full|small|voice|none, or any tier name) pins a tier and
-# ignores VRAM until removed.
+# ignores VRAM until removed. The default limits leave ~3 GB free at each tier's edge for a game to grow into
+# during the few seconds an unload takes. When a game/stream starts, the tier drops to llm.activityMaxTier at once
+# (default small), and polling runs every llm.activityPollSec (default 2 s) until it ends.
 # While a game or stream runs (llm.noLoadsDuringActivity, default on), no model is ever STARTED: unloads still happen
 # at once, but the smaller tier's model, upgrades and crash restarts wait until the activity ends. Loading a model
 # mid-game triggered GPU driver resets (TDR) on an RTX 4090 9-16 s after the load began. Outside games, a downgrade
@@ -25,6 +27,7 @@ $paths = Get-KitPaths
 New-Item -ItemType Directory -Force $paths.State, $paths.Logs | Out-Null
 
 $PollSeconds  = 5
+$BusyPoll     = $(if ($cfg.llm.activityPollSec) { [int]$cfg.llm.activityPollSec } else { 2 })
 $StreamFlag   = Join-Path $paths.State 'streaming.flag'
 $OverrideFile = Join-Path $paths.State 'override.txt'
 $StatusFile   = Join-Path $paths.State 'status.json'
@@ -43,7 +46,7 @@ function Get-TierConfig {
     $m = $cfg.llm.modes
     @(
         [pscustomobject]@{ name = 'full';  maxOthersMiB = 10240; whisper = $true;  model = $m.full },
-        [pscustomobject]@{ name = 'small'; maxOthersMiB = 16384; whisper = $true;  model = $(if ($m.game) { $m.game } else { $m.full }) },
+        [pscustomobject]@{ name = 'small'; maxOthersMiB = 14848; whisper = $true;  model = $(if ($m.game) { $m.game } else { $m.full }) },
         [pscustomobject]@{ name = 'voice'; maxOthersMiB = 19456; whisper = $true;  model = $null },
         [pscustomobject]@{ name = 'none';  maxOthersMiB = $null; whisper = $false; model = $null }
     )
@@ -58,6 +61,10 @@ foreach ($t in Get-TierConfig) {
 }
 $TierNames  = @($Tiers.Keys)
 $EstWhisper = 1500
+# Best tier allowed while a game/stream runs (llm.activityMaxTier, "" = no cap). Games size their texture pool from
+# the VRAM free at launch, so dropping at once on game start gives them the room before they fill it.
+$ActivityMax = $(if ($null -ne $cfg.llm.activityMaxTier) { "$($cfg.llm.activityMaxTier)" } else { 'small' })
+if ($ActivityMax -and $ActivityMax -notin $TierNames) { $ActivityMax = '' }
 
 function Get-TierArgs($tier) {
     $m = $Tiers[$tier].Model
@@ -224,6 +231,9 @@ while ($true) {
         if ($override) { $desired = $override; $reason = 'manual override' }
         elseif ($null -eq $vram) { $desired = $(if ($current) { $current } else { $TierNames[0] }); $reason = 'VRAM unreadable, keeping tier' }
         else { $desired = Get-AllowedTier $vram $current; $reason = "others $($vram.Others) MiB ($activity)" }
+        if (-not $override -and $ActivityMax -and $activity -ne 'idle' -and $TierNames.IndexOf($desired) -lt $TierNames.IndexOf($ActivityMax)) {
+            $desired = $ActivityMax; $reason = "$activity started (capped at $ActivityMax)"
+        }
 
         # learn real footprints once a tier has been loaded for a minute
         if ($vram -and $current -and $Tiers[$current].Model -and $vram.Llm -gt 500 -and ((Get-Date) - $since).TotalSeconds -gt 60) {
@@ -289,5 +299,5 @@ while ($true) {
            pending = $(if ($upgradeFrom) { $desired } else { $null }) } | ConvertTo-Json | Set-Content $StatusFile
     }
     catch { Write-Log "error: $_" }
-    Start-Sleep -Seconds $PollSeconds
+    Start-Sleep -Seconds $(if ($activity -ne 'idle') { $BusyPoll } else { $PollSeconds })
 }
