@@ -378,7 +378,12 @@ Assistant and the apps keep pointing at the main PC (the **orchestrator**) and n
   10300). The kit's own llama-server and Whisper move to localhost-only `cluster.localPorts` (8081, 10301). The router
   forwards each new connection over TCP, so streaming, Jev-mode `/v1/decision` and Wyoming all pass through unchanged.
 - **Routing:** while a game or stream runs on the orchestrator and a worker is healthy, the worker serves (inference
-  then doesn't compete with the game for the GPU). Otherwise the orchestrator serves if it can, else a worker.
+  then doesn't compete with the game for the GPU). The worker also serves while the orchestrator is about to swap
+  its model, and for 30 s after, so nobody hits a server mid-swap. Otherwise the orchestrator serves if it can,
+  else a worker. While nothing is up yet (a worker still loading right after a game starts), new connections wait up
+  to 30 s (`cluster.waitForBackendSec`) instead of failing, but only if a worker has checked in recently.
+- **Measured** (4090 orchestrator, 3080 worker, request every 2 s through a stream start, the stream end and the
+  Gemma swap): 103 requests, 0 failed; the one request at the moment the stream started waited 14 s.
 - **Asking workers to load:** workers poll `GET http://<orchestrator>:8079/assignment`. The orchestrator asks as soon
   as a game/stream starts, or once its own backend has been down for 15 s (`cluster.requestAfterSec`). It releases
   them once nothing runs and its own backend has been healthy for 60 s (`releaseAfterSec`).

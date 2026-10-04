@@ -42,7 +42,8 @@ $NoBusyLoads  = $(if ($null -ne $cfg.llm.noLoadsDuringActivity) { [bool]$cfg.llm
 $Role       = "$($cfg.cluster.role)"
 $IsWorker   = $Role -eq 'worker'
 $ServerPort = $(if ($Role -eq 'orchestrator' -and $cfg.cluster.localPorts.llm) { [int]$cfg.cluster.localPorts.llm } else { [int]$cfg.llm.port })
-$UpDelay    = $(if ($IsWorker) { 5 } else { $cfg.llm.upgradeDelaySec })   # a worker answers requests at once
+$UpDelay    = $(if ($IsWorker) { 0 } else { $cfg.llm.upgradeDelaySec })   # a worker answers requests at once
+if ($IsWorker) { $PollSeconds = 2 }
 $Assign     = [pscustomobject]@{ llm = $false; whisper = $false }
 $AssignOkAt = Get-Date
 

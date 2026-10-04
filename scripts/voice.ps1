@@ -110,5 +110,5 @@ while ($true) {
             $procs[$n] = Start-Voice $n
         }
     }
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds $(if ("$($cfg.cluster.role)" -eq 'worker') { 2 } else { 5 })
 }

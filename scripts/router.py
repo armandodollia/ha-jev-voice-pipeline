@@ -6,6 +6,7 @@ Routing, per new connection (TCP level, so streaming, Jev-mode /v1/decision and 
   - while a game/stream runs on the orchestrator (status.json activity) and a worker is healthy -> the worker,
     so inference doesn't compete with the game for the GPU
   - otherwise the local backend if it's healthy, else the first healthy worker, else the local backend anyway
+While no backend is healthy (a worker still loading), new connections wait up to waitForBackendSec instead of failing.
 Idle keep-alive connections to a backend that is no longer preferred are closed so clients reconnect to the new one.
 
 Worker assignment: workers poll GET /assignment on the control port and load models only while asked:
@@ -36,12 +37,14 @@ if "listen" not in CFG:
         "statusFile": str(root / "state" / "status.json"), "stateFile": str(root / "state" / "router.json"),
         "logFile": str(root / "logs" / "router.log"),
         "requestAfterSec": cl.get("requestAfterSec", 15), "releaseAfterSec": cl.get("releaseAfterSec", 60),
+        "waitForBackendSec": cl.get("waitForBackendSec", 30),
     }
 LOG = Path(CFG["logFile"])
 STATUS_FILE = Path(CFG["statusFile"])
 STATE_FILE = Path(CFG["stateFile"])
 REQUEST_AFTER = CFG.get("requestAfterSec", 15)
 RELEASE_AFTER = CFG.get("releaseAfterSec", 60)
+WAIT_FOR_BACKEND = CFG.get("waitForBackendSec", 30)   # hold a new connection this long while no backend is up
 KINDS = ("llm", "stt")
 
 
@@ -78,6 +81,9 @@ class Conn:
         self.kind, self.backend, self.cw = kind, backend, cw
         self.last, self.last_dir = time.monotonic(), "c2s"
 activity = "idle"
+pending = None                             # tier upgrade the local supervisor is waiting to do (status.json)
+pending_seen = -1e9                        # last time an upgrade was pending
+SWAP_GRACE = 30                            # keep preferring workers this long after the local model swap
 
 
 async def check_llm(b):
@@ -112,17 +118,21 @@ async def probe(b):
         log(f"{b.kind} {b.name} {'up' if ok else 'down'}")
 
 
-def read_activity():
+def read_status():
     try:
-        return json.loads(STATUS_FILE.read_text(encoding="utf-8-sig")).get("activity") or "idle"
+        st = json.loads(STATUS_FILE.read_text(encoding="utf-8-sig"))
+        return st.get("activity") or "idle", st.get("pending")
     except Exception:
-        return activity                    # file mid-write: keep the last value
+        return activity, pending           # file mid-write: keep the last values
 
 
 def order(kind):
     local, workers = BACKENDS[kind][0], BACKENDS[kind][1:]
     up = [w for w in workers if w.healthy]
-    if activity != "idle" and up:
+    # workers first while a game/stream runs, and while the local supervisor is about to swap its model (and a bit
+    # after), so nobody hits the local server mid-swap
+    swapping = kind == "llm" and time.monotonic() - pending_seen < SWAP_GRACE
+    if (activity != "idle" or swapping) and up:
         return up + [local] + [w for w in workers if not w.healthy]
     return sorted(BACKENDS[kind], key=lambda b: not b.healthy)   # stable: local first among equals
 
@@ -132,7 +142,8 @@ def update_wanted(kind):
     busy = activity != "idle"
     if busy or (not local.healthy and now - local.changed >= REQUEST_AFTER):
         want = True
-    elif local.healthy and now - local.changed >= RELEASE_AFTER:
+    elif local.healthy and now - local.changed >= RELEASE_AFTER and not (kind == "llm" and pending):
+        # (an upgrade still pending means the local model is about to be swapped: keep the worker through it)
         want = False
     else:
         want = WANTED[kind]
@@ -143,9 +154,11 @@ def update_wanted(kind):
 
 
 async def monitor():
-    global activity
+    global activity, pending, pending_seen
     while True:
-        new = read_activity()
+        new, pending = read_status()
+        if pending:
+            pending_seen = time.monotonic()
         if new != activity:
             log(f"activity: {new}")
             activity = new
@@ -163,11 +176,11 @@ async def monitor():
                     c.cw.close()
         STATE_FILE.write_text(json.dumps({
             "time": datetime.now().isoformat(timespec="seconds"), "activity": activity, "route": ROUTE,
-            "wanted": WANTED,
+            "wanted": WANTED, "local_pending_upgrade": pending,
             "backends": {k: {b.name: b.healthy for b in BACKENDS[k]} for k in KINDS},
             "workers": {n: {"last_poll_s": round(now - t), **q} for n, (t, q) in WORKER_SEEN.items()},
             "connections": len(CONNS)}, indent=2), encoding="utf-8")
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 
 async def pipe(src, dst, conn, direction):
@@ -187,15 +200,27 @@ async def pipe(src, dst, conn, direction):
 
 def proxy_handler(kind):
     async def handle(cr, cw):
-        for b in order(kind):
-            try:
-                br, bw = await asyncio.wait_for(asyncio.open_connection(b.host, b.port), 2)
-                break
-            except Exception:
-                continue
-        else:
-            cw.close()
-            return
+        # nothing up yet (e.g. the worker is still loading after a game started): wait instead of failing
+        # and retry if every backend refuses (one was just stopped and the health check hasn't noticed yet)
+        deadline = time.monotonic() + WAIT_FOR_BACKEND
+        b = None
+        while b is None:
+            # (only worth waiting for if a worker is alive: it polled /assignment recently)
+            alive = any(time.monotonic() - t < 30 for t, _ in WORKER_SEEN.values())
+            while alive and not any(x.healthy for x in BACKENDS[kind]) and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)
+            for x in order(kind):
+                try:
+                    br, bw = await asyncio.wait_for(asyncio.open_connection(x.host, x.port), 2)
+                    b = x
+                    break
+                except Exception:
+                    continue
+            if b is None:
+                if time.monotonic() >= deadline or not alive:
+                    cw.close()
+                    return
+                await asyncio.sleep(0.5)
         conn = Conn(kind, b.name, cw)
         CONNS.add(conn)
         try:
