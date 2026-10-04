@@ -341,6 +341,24 @@ if (-not $SkipTasks) {
         Start-ScheduledTask -TaskName $name
         Ok "$name started"
     }
+    # Multi-PC orchestrator: router.py owns the public LLM/Whisper ports and the workers' control port
+    if ("$($cfg.cluster.role)" -eq 'orchestrator') {
+        $sttPy = Join-Path $paths.Voice 'stt\Scripts\python.exe'
+        Stop-ScheduledTask -TaskName HomeRouter -ErrorAction SilentlyContinue
+        $action = New-ScheduledTaskAction -Execute $sttPy -WorkingDirectory $paths.Scripts `
+            -Argument "`"$(Join-Path $paths.Scripts 'router.py')`" `"$(Join-Path $paths.Root 'config.json')`""
+        Register-ScheduledTask -TaskName HomeRouter -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+            -Settings $settings -Principal $principal -Force | Out-Null
+        Get-NetFirewallRule -DisplayName 'HomeRouter control' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        $workerHosts = @($cfg.cluster.workers | ForEach-Object { $_.host })
+        if ($workerHosts) {
+            New-NetFirewallRule -DisplayName 'HomeRouter control' -Direction Inbound -Protocol TCP `
+                -LocalPort $(if ($cfg.cluster.controlPort) { $cfg.cluster.controlPort } else { 8079 }) `
+                -RemoteAddress $workerHosts -Action Allow | Out-Null
+        }
+        Start-ScheduledTask -TaskName HomeRouter
+        Ok "HomeRouter started (workers: $($workerHosts -join ', '))"
+    }
 }
 
 # ---------------------------------------------------------------- tailnet HTTPS (for phone/watch apps)

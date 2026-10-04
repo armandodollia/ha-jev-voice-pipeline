@@ -68,6 +68,18 @@
     "advertiseLanRoute": false
   },
 
+  "cluster": {
+    "_comment": "Multi-PC (README > Multiple PCs). role: \"\" = single PC, \"orchestrator\" = keeps the public ports and routes to itself or workers, \"worker\" = loads models only while the orchestrator asks.",
+    "role": "",
+    "localPorts": { "llm": 8081, "stt": 10301 },
+    "controlPort": 8079,
+    "workers": [ { "name": "pc2", "host": "192.168.1.50" } ],
+    "requestAfterSec": 15,
+    "releaseAfterSec": 60,
+    "name": "",
+    "orchestrator": ""
+  },
+
   "apollo": {
     "enabled": "auto",
     "confPath": "C:\\Program Files\\Apollo\\config\\sunshine.conf",

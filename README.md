@@ -369,6 +369,39 @@ LLM stepping aside; generate the data first, then train. Data generators can als
 pause while `tier` isn't `full` (for example before each batch), so they never mix answers from a smaller model
 into a dataset.
 
+## Multiple PCs (worker takes over while you game)
+
+A second PC with an NVIDIA GPU can serve the LLM and Whisper while the main PC is gaming or streaming. Home
+Assistant and the apps keep pointing at the main PC (the **orchestrator**) and never notice the switch.
+
+- **Router:** on the orchestrator, `scripts\router.py` (task `HomeRouter`) owns the public ports (LLM 8080, Whisper
+  10300). The kit's own llama-server and Whisper move to localhost-only `cluster.localPorts` (8081, 10301). The router
+  forwards each new connection over TCP, so streaming, Jev-mode `/v1/decision` and Wyoming all pass through unchanged.
+- **Routing:** while a game or stream runs on the orchestrator and a worker is healthy, the worker serves (inference
+  then doesn't compete with the game for the GPU). Otherwise the orchestrator serves if it can, else a worker.
+- **Asking workers to load:** workers poll `GET http://<orchestrator>:8079/assignment`. The orchestrator asks as soon
+  as a game/stream starts, or once its own backend has been down for 15 s (`cluster.requestAfterSec`). It releases
+  them once nothing runs and its own backend has been healthy for 60 s (`releaseAfterSec`).
+- **Worker rules:** the worker runs the same supervisor with its own tiers, sized for its VRAM. Its own games cap it
+  (`llm.activityMaxTier`), it never loads a model while its own game runs, and it unloads after 60 s without the
+  orchestrator. Whisper only runs while asked (`voice.services: ["whisper"]` skips Piper and the relays).
+- **Check it:** `http://<orchestrator>:8079/status` shows routes, backend health, what's wanted, and the workers'
+  last poll; `logs\router.log` logs every switch.
+
+Example worker tiers for a 10 GB card: `small` (Qwen3.5 4B + Whisper) while other programs use < 2.5 GB, `voice`
+(Whisper only) < 7.5 GB, then `none`; `activityMaxTier: "voice"`; margins 512 MiB. Gemma 12B doesn't fit in 10 GB.
+
+**Setup:**
+1. **Orchestrator:** in `config.json` set `cluster.role` to `"orchestrator"` and list the workers
+   (`name`, `host`). Re-run `install.ps1`; it registers `HomeRouter` and opens the control port to the workers only.
+2. **Worker:** copy a folder to it with `config.json` (`cluster.role: "worker"`, `cluster.name`,
+   `cluster.orchestrator: "http://<orchestrator-ip>:8079"`, the worker's tiers), `scripts\`,
+   `llama.cpp\build\bin\` (llama-server built for the worker's GPU, e.g. `cudaArch` 86 for an RTX 30-series card, plus
+   `cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`), `models\` and `requirements-stt.txt`
+   (`pip freeze` of the orchestrator's `voice\stt` venv). Copy `voice\data\models--*` too to skip the Whisper download.
+3. On the worker, run `scripts\install-worker.ps1` as administrator. It creates the Whisper venv, allows the LLM and
+   Whisper ports from the orchestrator only, and registers `HomeLLM` and `HomeVoice`.
+
 ## Activity detection
 
 Games and streams no longer pick the model (VRAM does). They're detected to hold back model loads while they run

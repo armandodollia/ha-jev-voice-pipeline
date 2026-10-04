@@ -27,9 +27,13 @@ $env:HF_HOME = Join-Path $Data 'hf'
 
 $haUrl     = $cfg.homeAssistant.url.TrimEnd('/')
 $tokenFile = Join-Path $paths.Root $cfg.homeAssistant.tokenFile
+# Multi-PC: on the orchestrator Whisper listens on localhost:cluster.localPorts.stt and router.py takes the public port
+# (the speech API keeps using the public port, so it is routed too). A worker runs Whisper only (voice.services).
+$sttUri = $(if ("$($cfg.cluster.role)" -eq 'orchestrator' -and $cfg.cluster.localPorts.stt) { "tcp://127.0.0.1:$($cfg.cluster.localPorts.stt)" }
+            else { "tcp://0.0.0.0:$($v.ports.wyomingStt)" })
 $whisperArgs = @('-m', 'wyoming_faster_whisper', '--model', $v.whisperModel, '--language', $v.language,
                  '--device', 'cuda', '--compute-type', $(if ($v.computeType) { $v.computeType } else { 'int8_float16' }), '--beam-size', '5',
-                 '--uri', "tcp://0.0.0.0:$($v.ports.wyomingStt)", '--data-dir', "`"$Data`"", '--download-dir', "`"$Data`"",
+                 '--uri', $sttUri, '--data-dir', "`"$Data`"", '--download-dir', "`"$Data`"",
                  '--vad-clip', '--vad-filter')      # trim edges; drop non-speech so silence can't hallucinate text
 if ($v.endpointingSec) { $whisperArgs += '--vad-endpointing', "$($v.endpointingSec)" }
 if (Test-Path $tokenFile) {
@@ -46,6 +50,10 @@ $Services = [ordered]@{
                    '--stt-port', "$($v.ports.wyomingStt)", '--tts-port', "$($v.ports.wyomingTts)") }
     haRelay   = @{ Exe = $sttPy; Args = @("`"$(Join-Path $paths.Scripts 'ha_relay.py')`"", '--port', "$($v.ports.haRelay)",
                    '--ha', ($haUrl -replace '^http', 'ws')) }
+}
+
+if ($v.services) {   # e.g. ["whisper"] on a worker PC
+    foreach ($n in @($Services.Keys)) { if ($n -notin @($v.services)) { $Services.Remove($n) } }
 }
 
 function Start-Voice($name) {

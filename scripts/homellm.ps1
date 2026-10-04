@@ -37,6 +37,14 @@ $Margin       = $(if ($cfg.vram.upgradeMarginMiB) { [int]$cfg.vram.upgradeMargin
 $Headroom     = $(if ($cfg.vram.headroomMiB) { [int]$cfg.vram.headroomMiB } else { 1024 })
 $LoadDelay    = $(if ($null -ne $cfg.llm.downgradeLoadDelaySec) { [int]$cfg.llm.downgradeLoadDelaySec } else { 60 })
 $NoBusyLoads  = $(if ($null -ne $cfg.llm.noLoadsDuringActivity) { [bool]$cfg.llm.noLoadsDuringActivity } else { $true })
+# Multi-PC (config cluster.role): an orchestrator's llama-server moves to cluster.localPorts.llm because router.py takes
+# the public port; a worker loads models only while the orchestrator asks (GET <orchestrator>/assignment).
+$Role       = "$($cfg.cluster.role)"
+$IsWorker   = $Role -eq 'worker'
+$ServerPort = $(if ($Role -eq 'orchestrator' -and $cfg.cluster.localPorts.llm) { [int]$cfg.cluster.localPorts.llm } else { [int]$cfg.llm.port })
+$UpDelay    = $(if ($IsWorker) { 5 } else { $cfg.llm.upgradeDelaySec })   # a worker answers requests at once
+$Assign     = [pscustomobject]@{ llm = $false; whisper = $false }
+$AssignOkAt = Get-Date
 
 function Write-Log($msg) { Write-KitLog 'supervisor.log' $msg }
 
@@ -69,7 +77,7 @@ if ($ActivityMax -and $ActivityMax -notin $TierNames) { $ActivityMax = '' }
 function Get-TierArgs($tier) {
     $m = $Tiers[$tier].Model
     $a = @('-m', "`"$(Join-Path $paths.Models $m.file)`"",
-           '--host', '0.0.0.0', '--port', "$($cfg.llm.port)", '--alias', $cfg.llm.alias) + @($cfg.llm.commonArgs)
+           '--host', $(if ($Role -eq 'orchestrator') { '127.0.0.1' } else { '0.0.0.0' }), '--port', "$ServerPort", '--alias', $cfg.llm.alias) + @($cfg.llm.commonArgs)
     if ($m.ctx)                { $a += '-c', "$($m.ctx)" }
     if ($m.decisionSeqs)       { $a += '--decision-seqs', "$($m.decisionSeqs)" }
     if ($m.chatTemplateKwargs) { $a += '--chat-template-kwargs', (ConvertTo-NativeJsonArg $m.chatTemplateKwargs) }
@@ -180,6 +188,24 @@ function Get-AllowedTier($vram, $current) {
     $TierNames[-1]
 }
 
+# Worker: what the orchestrator wants loaded. Keeps the last answer through short outages; after 60 s without an
+# answer (orchestrator off or unreachable) nothing is wanted.
+function Update-Assignment($tier, $activity) {
+    try {
+        $u = "$($cfg.cluster.orchestrator.TrimEnd('/'))/assignment?worker=$($cfg.cluster.name)&tier=$tier&activity=$([uri]::EscapeDataString($activity))"
+        $a = Invoke-RestMethod -Uri $u -TimeoutSec 3
+        if ([bool]$a.llm -ne [bool]$script:Assign.llm -or [bool]$a.whisper -ne [bool]$script:Assign.whisper) {
+            Write-Log "orchestrator asks: llm $([bool]$a.llm), whisper $([bool]$a.whisper)"
+        }
+        $script:Assign = [pscustomobject]@{ llm = [bool]$a.llm; whisper = [bool]$a.whisper }; $script:AssignOkAt = Get-Date
+    } catch {
+        if (((Get-Date) - $script:AssignOkAt).TotalSeconds -ge 60 -and ($script:Assign.llm -or $script:Assign.whisper)) {
+            Write-Log "orchestrator unreachable for 60 s: unloading"
+            $script:Assign = [pscustomobject]@{ llm = $false; whisper = $false }
+        }
+    }
+}
+
 function Stop-Server {
     Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $paths.Server } | ForEach-Object {
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -234,6 +260,15 @@ while ($true) {
         if (-not $override -and $ActivityMax -and $activity -ne 'idle' -and $TierNames.IndexOf($desired) -lt $TierNames.IndexOf($ActivityMax)) {
             $desired = $ActivityMax; $reason = "$activity started (capped at $ActivityMax)"
         }
+        if ($IsWorker -and -not $override) {
+            Update-Assignment $current $activity
+            # no LLM unless asked: step down to the next tier without a model
+            if (-not $Assign.llm -and $Tiers[$desired].Model) {
+                $i = $TierNames.IndexOf($desired)
+                while ($i -lt $TierNames.Count - 1 -and $Tiers[$TierNames[$i]].Model) { $i++ }
+                $desired = $TierNames[$i]; $reason = "$reason; orchestrator doesn't need the LLM"
+            }
+        }
 
         # learn real footprints once a tier has been loaded for a minute
         if ($vram -and $current -and $Tiers[$current].Model -and $vram.Llm -gt 500 -and ((Get-Date) - $since).TotalSeconds -gt 60) {
@@ -252,7 +287,7 @@ while ($true) {
         elseif ($desired -ne $current) {
             if ($TierNames.IndexOf($desired) -gt $TierNames.IndexOf($current) -or $reason -eq 'manual override') { $switch = $true }
             elseif (-not $upgradeFrom) { $upgradeFrom = Get-Date }
-            elseif (((Get-Date) - $upgradeFrom).TotalSeconds -ge $cfg.llm.upgradeDelaySec) { $switch = $true }
+            elseif (((Get-Date) - $upgradeFrom).TotalSeconds -ge $UpDelay) { $switch = $true }
         }
         if ($desired -eq $current -or $switch) { $upgradeFrom = $null }
 
@@ -294,7 +329,7 @@ while ($true) {
         }
 
         @{ mode = $current; tier = $current; model = $(if ($Tiers[$current].Model) { $Tiers[$current].Model.file } else { $null })
-           reason = $reason; activity = $activity; since = $since.ToString('o'); gpu_released = -not $Tiers[$current].Whisper
+           reason = $reason; activity = $activity; since = $since.ToString('o'); gpu_released = -not ($Tiers[$current].Whisper -and (-not $IsWorker -or $Assign.whisper))
            vram_used = $(if ($vram) { $vram.Used } else { $null }); vram_others = $(if ($vram) { $vram.Others } else { $null })
            pending = $(if ($upgradeFrom) { $desired } else { $null }) } | ConvertTo-Json | Set-Content $StatusFile
     }
