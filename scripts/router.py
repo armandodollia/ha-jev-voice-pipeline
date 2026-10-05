@@ -18,6 +18,7 @@ Usage: router.py <config.json>   (see the "cluster" section of config.example.js
 """
 import asyncio
 import json
+import socket
 import sys
 import time
 from datetime import datetime
@@ -32,7 +33,7 @@ if "listen" not in CFG:
     CFG = {
         "listen": {"llm": public_llm, "stt": public_stt, "control": cl.get("controlPort", 8079)},
         "local": {"llm": f"127.0.0.1:{cl['localPorts']['llm']}", "stt": f"127.0.0.1:{cl['localPorts']['stt']}"},
-        "workers": [{"name": w["name"], "llm": f"{w['host']}:{w.get('llmPort', public_llm)}",
+        "workers": [{"name": w["name"], "mac": w.get("mac"), "llm": f"{w['host']}:{w.get('llmPort', public_llm)}",
                      "stt": f"{w['host']}:{w.get('sttPort', public_stt)}"} for w in cl.get("workers", [])],
         "statusFile": str(root / "state" / "status.json"), "stateFile": str(root / "state" / "router.json"),
         "logFile": str(root / "logs" / "router.log"),
@@ -73,6 +74,39 @@ BACKENDS = {k: [Backend("local", k, CFG["local"][k])] +
 WANTED = {k: False for k in KINDS}
 ROUTE = {k: "local" for k in KINDS}
 WORKER_SEEN = {}                          # worker name -> last /assignment poll (time, query)
+WOL = {w["name"]: w["mac"] for w in CFG.get("workers", []) if w.get("mac")}
+WOL_SENT = {}                             # worker name -> (last send time, sends this episode)
+WOL_EVERY, WOL_MAX = 60, 5                # resend every minute, at most 5 times per episode
+
+
+def send_wol(mac):
+    raw = bytes.fromhex(mac.replace("-", "").replace(":", ""))
+    packet = b"\xff" * 6 + raw * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for addr in ("255.255.255.255", CFG.get("wolBroadcast", "255.255.255.255")):
+            for port in (9, 7):
+                s.sendto(packet, (addr, port))
+
+
+def wake_workers():
+    """While workers are wanted, wake any that hasn't polled in 20 s (asleep or off): Wake-on-LAN, resent every
+    minute, up to WOL_MAX times until it shows up again."""
+    now = time.monotonic()
+    wanted = WANTED["llm"] or WANTED["stt"]
+    for name, mac in WOL.items():
+        seen = WORKER_SEEN.get(name, (-1e9, None))[0]
+        if not wanted or now - seen < 20:
+            WOL_SENT.pop(name, None)
+            continue
+        last, count = WOL_SENT.get(name, (-1e9, 0))
+        if count < WOL_MAX and now - last >= WOL_EVERY:
+            try:
+                send_wol(mac)
+                log(f"{name}: not responding, sent Wake-on-LAN ({count + 1}/{WOL_MAX})")
+            except Exception as e:
+                log(f"{name}: Wake-on-LAN failed: {e}")
+            WOL_SENT[name] = (now, count + 1)
 CONNS = set()
 
 
@@ -174,6 +208,7 @@ async def monitor():
             for c in [c for c in CONNS if c.kind == k and c.backend != first]:
                 if c.last_dir == "s2c" and now - c.last > 5:
                     c.cw.close()
+        wake_workers()
         STATE_FILE.write_text(json.dumps({
             "time": datetime.now().isoformat(timespec="seconds"), "activity": activity, "route": ROUTE,
             "wanted": WANTED, "local_pending_upgrade": pending,

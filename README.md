@@ -390,6 +390,9 @@ Assistant and the apps keep pointing at the main PC (the **orchestrator**) and n
 - **Worker rules:** the worker runs the same supervisor with its own tiers, sized for its VRAM. Its own games cap it
   (`llm.activityMaxTier`), it never loads a model while its own game runs, and it unloads after 60 s without the
   orchestrator. Whisper only runs while asked (`voice.services: ["whisper"]` skips Piper and the relays).
+- **Wake-on-LAN:** give a worker its `mac` and the orchestrator wakes it when it's needed (a game starts) but hasn't
+  checked in for 20 s, resending every minute up to 5 times. The worker needs Wake-on-LAN enabled in its BIOS and on
+  its network adapter. It can't revive a PC that has frozen.
 - **Check it:** `http://<orchestrator>:8079/status` shows routes, backend health, what's wanted, and the workers'
   last poll; `logs\router.log` logs every switch.
 
