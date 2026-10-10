@@ -12,7 +12,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { throw 'Run this from an elevated PowerShell (Run as administrator).' }
 
-foreach ($name in 'HomeLLM', 'HomeVoice') {
+foreach ($name in 'HomeLLM', 'HomeVoice', 'HomeRouter') {
     if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $name -Confirm:$false
@@ -22,11 +22,12 @@ foreach ($name in 'HomeLLM', 'HomeVoice') {
 
 Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $paths.Server } | Stop-Process -Force
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -match 'wyoming_(faster_whisper|piper)|speech_api\.py|ha_relay\.py' } |
+    Where-Object { $_.CommandLine -match 'wyoming_(faster_whisper|piper)|speech_api\.py|ha_relay\.py|router\.py' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Write-Host 'stopped servers'
 
-Get-NetFirewallRule -DisplayName 'HomeLLM llama-server', 'HomeLLM llama-server program', 'HomeVoice Wyoming', 'HomeVoice Python' -ErrorAction SilentlyContinue |
+Get-NetFirewallRule -DisplayName 'HomeLLM llama-server', 'HomeLLM llama-server program', 'HomeVoice Wyoming', 'HomeVoice Python',
+    'HomeRouter control', 'HomeLLM worker*' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
 Write-Host 'removed firewall rules'
 

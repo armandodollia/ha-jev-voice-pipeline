@@ -1,0 +1,115 @@
+{
+  "_comment": "Example config for a WORKER PC (multi-PC setup, README > Multiple PCs). Copy to config.json on the worker. Tiers sized for a 10 GB card (e.g. RTX 3080); set cluster.orchestrator to the main PC.",
+  "llm": {
+    "port": 8080,
+    "alias": "home",
+    "cudaArch": "86",
+    "fork": {
+      "repo": "thecodacus/llama.cpp",
+      "branch": "parallel-decision"
+    },
+    "upgradeDelaySec": 90,
+    "_upgradeDelaySec": "others must stay vram.upgradeMarginMiB under a bigger tier's limit this long before it loads",
+    "downgradeLoadDelaySec": 60,
+    "_downgradeLoadDelaySec": "outside games: after a downgrade unloads the bigger model, wait this long before loading the smaller one",
+    "noLoadsDuringActivity": true,
+    "activityMaxTier": "voice",
+    "_activityMaxTier": "best tier allowed while a game/stream runs; applied the moment it starts, so the game launches with the memory free (games size texture pools at launch). \"\" = no cap",
+    "activityPollSec": 2,
+    "_activityPollSec": "VRAM check interval while a game/stream runs (5 s otherwise)",
+    "_noLoadsDuringActivity": "while a game/stream runs, only unload: model loads, upgrades and crash restarts wait until it ends (loading mid-game caused GPU driver resets)",
+    "commonArgs": [
+      "-ngl",
+      "99",
+      "-fa",
+      "on",
+      "--jinja",
+      "--parallel",
+      "1",
+      "-ctk",
+      "q8_0",
+      "-ctv",
+      "q8_0",
+      "--no-webui"
+    ],
+    "_tiers": "Best first. A tier is used while other programs (games, stream encoder, training jobs) use less GPU memory than maxOthersMiB. whisper=false also stops speech-to-text.",
+    "tiers": [
+      {
+        "name": "small",
+        "maxOthersMiB": 2560,
+        "whisper": true,
+        "model": {
+          "repo": "unsloth/Qwen3.5-4B-GGUF",
+          "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+          "ctx": 16384,
+          "decisionSeqs": 12,
+          "chatTemplateKwargs": {
+            "enable_thinking": false
+          }
+        }
+      },
+      {
+        "name": "voice",
+        "maxOthersMiB": 7680,
+        "whisper": true
+      },
+      {
+        "name": "none",
+        "whisper": false
+      }
+    ]
+  },
+  "vram": {
+    "upgradeMarginMiB": 512,
+    "headroomMiB": 512
+  },
+  "voice": {
+    "enabled": true,
+    "python": "",
+    "whisperModel": "large-v3-turbo",
+    "computeType": "int8_float16",
+    "language": "en",
+    "piperVoice": "en_US-hfc_female-medium",
+    "endpointingSec": 0.8,
+    "ports": {
+      "wyomingStt": 10300,
+      "wyomingTts": 10200,
+      "speechApi": 10310,
+      "haRelay": 10320
+    },
+    "services": [
+      "whisper"
+    ]
+  },
+  "homeAssistant": {
+    "url": "http://homeassistant.local:8123",
+    "tokenFile": "hass_token.txt"
+  },
+  "tailscale": {
+    "_comment": "Remote access over your tailnet (see README > Tailscale). Set enabled=false for LAN-only.",
+    "enabled": false,
+    "login": true,
+    "authKeyFile": "",
+    "hostname": "",
+    "unattended": true,
+    "allowTailnetFirewall": true,
+    "serve": {
+      "_comment": "HTTPS ports published inside the tailnet only (0 = don't publish).",
+      "speechApi": 443,
+      "haRelay": 8443,
+      "llm": 0
+    },
+    "advertiseLanRoute": false
+  },
+  "apollo": {
+    "enabled": false,
+    "confPath": "C:\\Program Files\\Apollo\\config\\sunshine.conf",
+    "serviceName": "ApolloService"
+  },
+  "cluster": {
+    "role": "worker",
+    "name": "pc2",
+    "orchestrator": "http://192.168.1.10:8079",
+    "_comment": "role worker: loads models only while the orchestrator asks; name must match the orchestrator's cluster.workers[].name"
+  }
+}

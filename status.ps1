@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Shows the current VRAM tier, service health and recent log lines.
+  Shows the current VRAM tier, service health, multi-PC routing (if cluster.role is set) and recent log lines.
   .\status.ps1 -Mode full|small|voice|none|auto   pins a tier (auto = back to automatic VRAM tiers).
   Pin a tier while long GPU jobs need the LLM to stay put (e.g. a teacher model for training data).
 #>
@@ -26,11 +26,19 @@ if (Test-Path $statusFile) {
 function Show($name, $ok) { Write-Host ("{0,-22} {1}" -f $name, $(if ($ok) { 'up' } else { 'DOWN' })) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' }) }
 $llm = try { (Invoke-RestMethod "http://127.0.0.1:$($cfg.llm.port)/health" -TimeoutSec 3).status -eq 'ok' } catch { $false }
 Write-Host ''
-Show "LLM :$($cfg.llm.port)" $llm
-if ($cfg.voice.enabled) {
-    $v = $cfg.voice.ports
-    foreach ($p in @(@('Whisper', $v.wyomingStt), @('Piper', $v.wyomingTts), @('Speech API', $v.speechApi), @('Assist relay', $v.haRelay))) {
-        Show "$($p[0]) :$($p[1])" (Test-NetConnection 127.0.0.1 -Port $p[1] -InformationLevel Quiet -WarningAction SilentlyContinue)
+$v = $cfg.voice.ports
+if ("$($cfg.cluster.role)" -eq 'worker') {
+    # a worker only runs the LLM and Whisper, and only while the orchestrator asks: idle is normal
+    $wh = Test-NetConnection 127.0.0.1 -Port $v.wyomingStt -InformationLevel Quiet -WarningAction SilentlyContinue
+    foreach ($p in @(@("LLM :$($cfg.llm.port)", $llm), @("Whisper :$($v.wyomingStt)", $wh))) {
+        Write-Host ("{0,-22} {1}" -f $p[0], $(if ($p[1]) { 'up' } else { 'idle (not needed right now)' })) -ForegroundColor $(if ($p[1]) { 'Green' } else { 'Gray' })
+    }
+} else {
+    Show "LLM :$($cfg.llm.port)" $llm
+    if ($cfg.voice.enabled) {
+        foreach ($p in @(@('Whisper', $v.wyomingStt), @('Piper', $v.wyomingTts), @('Speech API', $v.speechApi), @('Assist relay', $v.haRelay))) {
+            Show "$($p[0]) :$($p[1])" (Test-NetConnection 127.0.0.1 -Port $p[1] -InformationLevel Quiet -WarningAction SilentlyContinue)
+        }
     }
 }
 if ($cfg.tailscale.enabled) {
@@ -44,7 +52,27 @@ if ($cfg.tailscale.enabled) {
         }
     } else { Write-Host "`ntailnet: not connected" -ForegroundColor Yellow }
 }
-foreach ($t in 'HomeLLM', 'HomeVoice') {
+# Multi-PC (README > Multiple PCs)
+$role = "$($cfg.cluster.role)"
+if ($role -eq 'orchestrator') {
+    $port = $(if ($cfg.cluster.controlPort) { $cfg.cluster.controlPort } else { 8079 })
+    try {
+        $r = Invoke-RestMethod "http://127.0.0.1:$port/status" -TimeoutSec 3
+        Write-Host "`nrouter: llm -> $($r.route.llm), whisper -> $($r.route.stt); workers asked to load: llm $($r.wanted.llm), whisper $($r.wanted.stt)"
+        foreach ($w in $r.workers.PSObject.Properties) {
+            Write-Host ("  worker {0,-10} last check-in {1} s ago, tier {2}, activity {3}; llm {4}, whisper {5}" -f $w.Name,
+                $w.Value.last_poll_s, $w.Value.tier, $w.Value.activity,
+                $(if ($r.backends.llm.($w.Name)) { 'up' } else { 'down' }), $(if ($r.backends.stt.($w.Name)) { 'up' } else { 'down' }))
+        }
+        if (-not $r.workers.PSObject.Properties.Count) { Write-Host '  no worker has checked in yet' -ForegroundColor Yellow }
+    } catch { Write-Host "`nrouter: not answering on :$port" -ForegroundColor Red }
+} elseif ($role -eq 'worker') {
+    try {
+        $a = Invoke-RestMethod "$($cfg.cluster.orchestrator.TrimEnd('/'))/status" -TimeoutSec 3
+        Write-Host "`norchestrator $($cfg.cluster.orchestrator): activity $($a.activity); asks this worker for llm $($a.wanted.llm), whisper $($a.wanted.stt)"
+    } catch { Write-Host "`norchestrator $($cfg.cluster.orchestrator): not reachable (this worker unloads after 60 s)" -ForegroundColor Yellow }
+}
+foreach ($t in 'HomeLLM', 'HomeVoice', 'HomeRouter') {
     $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
     if ($task) { Write-Host ("task {0,-17} {1}" -f $t, $task.State) }
 }

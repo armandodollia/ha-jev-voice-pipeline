@@ -2,7 +2,8 @@
 
 Run a local LLM and voice stack for Home Assistant on a Windows gaming PC with an NVIDIA GPU, and use it from
 Home Assistant's Assist and from a Pebble watch, at home or away (over Tailscale). The model steps down
-automatically as games, streams or other GPU jobs need video memory, so the GPU stays usable.
+automatically as games, streams or other GPU jobs need video memory, so the GPU stays usable. Optionally a second
+GPU PC takes over the LLM and Whisper while you game (see [Multiple PCs](#multiple-pcs-worker-takes-over-while-you-game)).
 
 | Piece | What it does | Port |
 |---|---|---|
@@ -11,6 +12,7 @@ automatically as games, streams or other GPU jobs need video memory, so the GPU 
 | **Whisper** (Wyoming, GPU) | Speech-to-text for Assist, biased toward your Home Assistant device names | 10300 |
 | **Piper** (Wyoming, CPU) | Text-to-speech for Assist | 10200 |
 | **Speech API** | OpenAI-style `/v1/audio/transcriptions` + `/v1/audio/speech` in front of Whisper/Piper, for the watch | 10310 |
+| **Router** (multi-PC only) | On the main PC, keeps the public LLM and Whisper ports and forwards each connection to the main PC or a worker PC; wakes workers with Wake-on-LAN | 8080, 10300 (public), 8079 (workers) |
 | **Assist relay** | Runs Home Assistant `/api/conversation/process` calls and OpenAI `/v1/chat/completions` calls through your **Assist pipeline**, for apps that can't choose an agent (Wristotle's HA commands and Ask Agent) | 10320 (localhost) |
 
 Default VRAM tiers (edit `llm.tiers` in `config.json`). "Other programs" means everything on the GPU except
@@ -393,7 +395,7 @@ Assistant and the apps keep pointing at the main PC (the **orchestrator**) and n
 - **Wake-on-LAN:** give a worker its `mac` and the orchestrator wakes it when it's needed (a game starts) but hasn't
   checked in for 20 s, resending every minute up to 5 times. The worker needs Wake-on-LAN enabled in its BIOS and on
   its network adapter. It can't revive a PC that has frozen.
-- **Check it:** `http://<orchestrator>:8079/status` shows routes, backend health, what's wanted, and the workers'
+- **Check it:** `.\status.ps1` on either PC shows the routing and worker state; `http://<orchestrator>:8079/status` shows routes, backend health, what's wanted, and the workers'
   last poll; `logs\router.log` logs every switch.
 
 Example worker tiers for a 10 GB card: `small` (Qwen3.5 4B + Whisper) while other programs use < 2.5 GB, `voice`
@@ -402,7 +404,7 @@ Example worker tiers for a 10 GB card: `small` (Qwen3.5 4B + Whisper) while othe
 **Setup:**
 1. **Orchestrator:** in `config.json` set `cluster.role` to `"orchestrator"` and list the workers
    (`name`, `host`). Re-run `install.ps1`; it registers `HomeRouter` and opens the control port to the workers only.
-2. **Worker:** copy a folder to it with `config.json` (`cluster.role: "worker"`, `cluster.name`,
+2. **Worker:** copy a folder to it with `config.json` (start from `config.worker.example.json`: `cluster.role: "worker"`, `cluster.name`,
    `cluster.orchestrator: "http://<orchestrator-ip>:8079"`, the worker's tiers), `scripts\`,
    `llama.cpp\build\bin\` (llama-server built for the worker's GPU, e.g. `cudaArch` 86 for an RTX 30-series card, plus
    `cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`), `models\` and `requirements-stt.txt`
@@ -452,9 +454,12 @@ Logs (`logs\`): `supervisor.log` (tier switches, activity), `server-<tier>.err.l
 ```
 install.ps1 / uninstall.ps1 / status.ps1
 config.example.json        -> config.json (your settings)
+config.worker.example.json -> config.json on a worker PC (multi-PC)
 games.txt, ignore.txt      game detection lists
 scripts\homellm.ps1        VRAM tier supervisor (task HomeLLM)
 scripts\voice.ps1          voice supervisor (task HomeVoice)
+scripts\router.py          multi-PC router + Wake-on-LAN (task HomeRouter, orchestrator only)
+scripts\install-worker.ps1 sets up a worker PC
 scripts\speech_api.py      OpenAI-style speech API (watch STT/TTS)
 scripts\ha_relay.py        Assist pipeline relay (watch commands)
 scripts\patch_piper.py     Windows fix for wyoming-piper
