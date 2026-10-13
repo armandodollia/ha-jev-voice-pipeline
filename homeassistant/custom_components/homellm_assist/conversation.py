@@ -54,9 +54,11 @@ INSTRUCTIONS = (
     "for. Brightness is a percentage. Use brighten or dim for relative changes (brighter, dimmer, turn it up/down) "
     "and give the amount if the user said one (a little, a lot, or percentage points). "
     "White temperature is warm, soft, neutral, cool, daylight or a number of Kelvin. "
-    "Scope: one_device when the user names a device from the list (even if its name contains a room); "
+    "Scope: one_device when the user names a device or a group from the list, even if its name contains a room "
+    "('close the TV room shades' when TV Room Shades is a group means that group, controlled as one); "
     "this_room for a kind of device without a room or device name ('close the shades', 'turn off the lights'); "
-    "named_room for a kind of device in a room the user names ('the TV room lights'); "
+    "named_room for every individual device of a kind in a room the user names, when no group has that name or the "
+    "user says each, every, all, both or individually ('close each of the TV room shades', 'all the TV room shades'); "
     "whole_house for all of a kind everywhere ('close all the shades', 'every light in the house'). "
     "If it is a question, a chat, a warmer/cooler change, or a device that is not in the list, "
     "answer action 'other' and device 'none'. "
@@ -164,6 +166,22 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             return {eid}
         return set().union(*(self._leaves(m, seen) for m in members))
 
+    def _group_note(self, devices: dict[str, str]) -> str:
+        """' Groups ...: A (b, c); D (e, f).' so the model knows which names control several devices as one.
+        Stable between requests (only changes when groups change), so the cached prompt stays valid."""
+        by_eid = {}
+        for name, eid in devices.items():
+            by_eid.setdefault(eid, name)
+        parts = []
+        for eid, name in sorted(by_eid.items(), key=lambda x: x[1]):
+            state = self.hass.states.get(eid)
+            members = state.attributes.get("entity_id") if state else None
+            if not isinstance(members, list) or not members:
+                continue
+            member_names = [self.hass.states.get(m).name if self.hass.states.get(m) else m for m in members]
+            parts.append(f"{name} ({', '.join(member_names)})")
+        return (" Groups (one name that controls several devices together): " + "; ".join(parts) + ".") if parts else ""
+
     def _speaker_area(self, user_input: conversation.ConversationInput) -> str | None:
         """Area of the voice device that heard the request (None from phones, the watch, the web UI)."""
         device_id = user_input.device_id
@@ -198,7 +216,7 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
     async def _decide(self, text: str, devices: dict[str, str], rooms: list[str]) -> dict | None:
         payload = {
             "model": "home",
-            "instructions": INSTRUCTIONS,
+            "instructions": INSTRUCTIONS + self._group_note(devices),
             "schema": {
                 "action": {"type": "enum",
                            "choices": ["turn_on", "turn_off", "open", "close", *LIGHT_ACTIONS, "other"],

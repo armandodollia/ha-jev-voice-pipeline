@@ -286,8 +286,12 @@ never on the fast path.
 - **Brightness, colour and temperature work too.** Lights that can't do the requested setting are skipped.
 - **"This room" needs a voice device assigned to an area.** Requests from phones, the watch or the web UI have no room,
   so they go to the fallback agent, which can ask which room.
-- **Groups:** a group is used when some of its members aren't exposed themselves; its members are then skipped.
-  Groups whose members are all exposed are skipped.
+- **Group or individuals:** the prompt lists your groups with their members.
+  - Naming a group controls it as one device: "close the TV room shades" when TV Room Shades is a group.
+  - "Each", "every", "all", "both" or "individually" mean every device of that kind in the room: "close each of the
+    TV room shades".
+- **Groups in room or house commands:** a group is used when some of its members aren't exposed themselves; its
+  members are then skipped. Groups whose members are all exposed are skipped.
 - **Entity areas** come from the entity, else its device. A YAML entity needs a `unique_id` before it can get an area.
 
 Setup:
