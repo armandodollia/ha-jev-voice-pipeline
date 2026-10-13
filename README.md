@@ -243,6 +243,26 @@ example automation.
 
 ---
 
+### 3.7 Decision-first Assist agent (optional): no hallucinated devices
+`homeassistant\custom_components\homellm_assist` is a conversation agent for your Assist pipeline. For every request
+it first asks the local model a Jev-mode decision with two fixed-choice questions:
+- **action:** turn_on, turn_off, open, close or other
+- **device:** one of the devices exposed to Assist (names and aliases), or none
+
+The model can only answer with those values, so it can't invent a device. When both answers are confident (defaults
+0.7 / 0.6) and fit together (lights, switches, fans and scripts turn on/off; covers open/close), the agent runs the
+action and replies, e.g. "Turned on Office Lights." It takes 0.1–0.6 s. Everything else goes unchanged to a fallback
+agent (your LLM agent): questions, brightness, several devices, unknown devices and low-confidence answers. Locks, alarms
+and garage/gate/door covers are never on the fast path.
+
+Setup:
+1. Copy the folder to `/config/custom_components/` and restart Home Assistant.
+2. Add **Home LLM Assist** under Settings → Devices & services. Set the decision URL
+   (`http://<pc>:8080/v1/decision`) and the fallback agent.
+3. Set it as the conversation agent of your Assist pipeline.
+
+Decisions are logged at INFO level under `custom_components.homellm_assist`.
+
 ## 4. Pebble watch (Wristotle)
 
 The watch records your voice → the phone sends it to **Whisper on the PC** → the transcript goes through your

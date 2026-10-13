@@ -1,0 +1,24 @@
+"""Constants for Home LLM Assist."""
+
+DOMAIN = "homellm_assist"
+
+CONF_DECISION_URL = "decision_url"
+CONF_FALLBACK_AGENT = "fallback_agent"
+CONF_ACTION_THRESHOLD = "action_threshold"
+CONF_DEVICE_THRESHOLD = "device_threshold"
+
+DEFAULT_DECISION_URL = "http://192.168.1.33:8080/v1/decision"
+DEFAULT_FALLBACK_AGENT = "conversation.local_llm_server_home_ai_agent"
+DEFAULT_ACTION_THRESHOLD = 0.7
+DEFAULT_DEVICE_THRESHOLD = 0.6
+
+# What each spoken action does per domain. Domains or device classes not listed here are never handled by the
+# fast path; those requests (and anything uncertain) go to the fallback agent.
+ACTIONS = {
+    "turn_on": {"light": "turn_on", "switch": "turn_on", "fan": "turn_on", "script": "turn_on", "cover": "open_cover"},
+    "turn_off": {"light": "turn_off", "switch": "turn_off", "fan": "turn_off", "cover": "close_cover"},
+    "open": {"cover": "open_cover"},
+    "close": {"cover": "close_cover"},
+}
+# security-sensitive covers stay with the fallback agent (and its confirmations)
+EXCLUDED_COVER_CLASSES = {"garage", "gate", "door"}
