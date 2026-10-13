@@ -35,5 +35,9 @@ KELVIN_STEPS = ["2000", "2200", "2500", "2700", "3000", "3500", "4000", "4500", 
 CONF_VALUE_THRESHOLD = "value_threshold"
 DEFAULT_VALUE_THRESHOLD = 0.5
 
+# room/house-wide commands: what kind of device, and which domains that means
+KINDS = {"lights": ("light",), "shades": ("cover",), "switches": ("switch",), "fans": ("fan",)}
+SCOPES = ["one_device", "this_room", "named_room", "whole_house"]
+
 # security-sensitive covers stay with the fallback agent (and its confirmations)
 EXCLUDED_COVER_CLASSES = {"garage", "gate", "door"}

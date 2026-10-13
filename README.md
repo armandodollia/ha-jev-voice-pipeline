@@ -273,6 +273,23 @@ The model can only answer with those values, so it can't invent a device. The ag
 Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers. Locks, alarms and garage/gate/door covers are
 never on the fast path.
 
+**Rooms:** the same decision call also asks for a **scope**, a **device kind** and a **room**:
+
+| Scope | Example | Targets |
+|---|---|---|
+| one device | "close the master bedroom shades" | that device, as before |
+| this room | "close the shades", "turn off the lights" | every exposed device of that kind in the area of the voice device that heard it |
+| named room | "turn off the TV room lights" | that kind in the named area |
+| whole house | "close all the shades" | that kind everywhere |
+
+- **Device kinds:** lights, shades, switches and fans.
+- **Brightness, colour and temperature work too.** Lights that can't do the requested setting are skipped.
+- **"This room" needs a voice device assigned to an area.** Requests from phones, the watch or the web UI have no room,
+  so they go to the fallback agent, which can ask which room.
+- **Groups:** a group is used when some of its members aren't exposed themselves; its members are then skipped.
+  Groups whose members are all exposed are skipped.
+- **Entity areas** come from the entity, else its device. A YAML entity needs a `unique_id` before it can get an area.
+
 Setup:
 1. Copy the folder to `/config/custom_components/` and restart Home Assistant.
 2. Add **Home LLM Assist** under Settings → Devices & services. Set the decision URL

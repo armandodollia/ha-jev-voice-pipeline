@@ -15,7 +15,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_should
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er, intent
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er, intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -36,6 +36,8 @@ from .const import (
     DEFAULT_VALUE_THRESHOLD,
     DOMAIN,
     EXCLUDED_COVER_CLASSES,
+    KINDS,
+    SCOPES,
     KELVIN_STEPS,
     KELVIN_WORDS,
     LIGHT_ACTIONS,
@@ -52,10 +54,16 @@ INSTRUCTIONS = (
     "for. Brightness is a percentage. Use brighten or dim for relative changes (brighter, dimmer, turn it up/down) "
     "and give the amount if the user said one (a little, a lot, or percentage points). "
     "White temperature is warm, soft, neutral, cool, daylight or a number of Kelvin. "
-    "If it is a question, a chat, a warmer/cooler change, several devices or a whole room, "
-    "or a device that is not in the list, answer action 'other' and device 'none'. "
+    "Scope: one_device when the user names a device from the list (even if its name contains a room); "
+    "this_room for a kind of device without a room or device name ('close the shades', 'turn off the lights'); "
+    "named_room for a kind of device in a room the user names ('the TV room lights'); "
+    "whole_house for all of a kind everywhere ('close all the shades', 'every light in the house'). "
+    "If it is a question, a chat, a warmer/cooler change, or a device that is not in the list, "
+    "answer action 'other' and device 'none'. "
     "Answer 'none' for values the user did not ask for."
 )
+VERB = {"turn_on": "Turned on", "turn_off": "Turned off", "open": "Opened", "close": "Closed",
+        "set_brightness": "Set", "brighten": "Brightened", "dim": "Dimmed", "set_color": "Set", "set_temperature": "Set"}
 DONE = {"turn_on": "Turned on {}.", "turn_off": "Turned off {}.", "open": "Opening {}.", "close": "Closing {}.",
         "set_brightness": "Set {} to {}%.",
         "brighten": "Brightened {} to {}%.", "dim": "Dimmed {} to {}%.", "set_color": "Set {} to {}.", "set_temperature": "Set {} to {} K."}
@@ -134,6 +142,37 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
 
+    def _area_of(self, eid: str) -> str | None:
+        """Area of an entity (its own, else its device's)."""
+        entry = er.async_get(self.hass).async_get(eid)
+        if entry is None:
+            return None
+        if entry.area_id:
+            return entry.area_id
+        device = dr.async_get(self.hass).async_get(entry.device_id) if entry.device_id else None
+        return device.area_id if device else None
+
+    def _leaves(self, eid: str, seen: set[str] | None = None) -> set[str]:
+        """The actual devices behind an entity: itself, or its group members expanded recursively."""
+        seen = seen if seen is not None else set()
+        if eid in seen:
+            return set()
+        seen.add(eid)
+        state = self.hass.states.get(eid)
+        members = state.attributes.get("entity_id") if state else None
+        if not isinstance(members, list) or not members:
+            return {eid}
+        return set().union(*(self._leaves(m, seen) for m in members))
+
+    def _speaker_area(self, user_input: conversation.ConversationInput) -> str | None:
+        """Area of the voice device that heard the request (None from phones, the watch, the web UI)."""
+        device_id = user_input.device_id
+        if not device_id and user_input.satellite_id:
+            sat = er.async_get(self.hass).async_get(user_input.satellite_id)
+            device_id = sat.device_id if sat else None
+        device = dr.async_get(self.hass).async_get(device_id) if device_id else None
+        return device.area_id if device else None
+
     def _devices(self) -> dict[str, str]:
         """Spoken name -> entity_id for every device the fast path may control (exposed to Assist, supported
         domain, not security-sensitive). Names and aliases; the first entity wins on a duplicate name."""
@@ -156,7 +195,7 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                     names[key] = eid
         return dict(list(names.items())[:250])   # the engine allows up to 255 values per field
 
-    async def _decide(self, text: str, devices: dict[str, str]) -> dict | None:
+    async def _decide(self, text: str, devices: dict[str, str], rooms: list[str]) -> dict | None:
         payload = {
             "model": "home",
             "instructions": INSTRUCTIONS,
@@ -166,6 +205,12 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                            "description": "What does the user want done?"},
                 "device": {"type": "enum", "choices": [*devices.keys(), "none"],
                            "description": "Which single device from the list is the user talking about?"},
+                "scope": {"type": "enum", "choices": SCOPES,
+                          "description": "One named device, this room, a room the user names, or the whole house?"},
+                "kind": {"type": "enum", "choices": [*KINDS, "none"],
+                         "description": "Which kind of device (for this_room / named_room / whole_house)"},
+                "room": {"type": "enum", "choices": [*rooms, "none"],
+                         "description": "The room the user named, if any"},
                 "brightness": {"type": "enum", "choices": [*(f"{n}%" for n in BRIGHTNESS_STEPS), "none"],
                                "description": "Brightness percentage the user asked to set (not a relative change)"},
                 "step": {"type": "enum", "choices": [*STEP_WORDS, *(f"{a}%" for a in STEP_AMOUNTS), "none"],
@@ -239,10 +284,83 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             return "light", "turn_on", {"color_temp_kelvin": kelvin}, str(kelvin)
         return None   # the light can't do that: let the fallback agent explain
 
+    async def _try_multi(self, user_input, result, devices, areas, start) -> conversation.ConversationResult | None:
+        """this_room / named_room / whole_house: every exposed device of the kind in that scope. None = not a
+        confident multi-device command (the single-device path or the fallback agent takes it)."""
+        d, f = result["decision"], result["fields"]
+        scope, kind, action = d.get("scope"), d.get("kind"), d.get("action")
+        threshold = self._opt(CONF_ACTION_THRESHOLD, DEFAULT_ACTION_THRESHOLD)
+        action_threshold = threshold
+        if action in ("set_brightness", "brighten", "dim") and _spoken_percent(user_input.text) is not None:
+            action_threshold = min(threshold, 0.5)
+        if (scope not in ("this_room", "named_room", "whole_house") or f["scope"]["probability"] < threshold
+                or kind not in KINDS or f["kind"]["probability"] < threshold
+                or action in (None, "other") or f["action"]["probability"] < action_threshold):
+            return None
+        if scope == "this_room":
+            area_id = self._speaker_area(user_input)
+            if area_id is None:
+                return None   # no room known for this device (phone, watch): the fallback agent can ask
+        elif scope == "named_room":
+            if d.get("room") not in areas or f["room"]["probability"] < self._opt(
+                    CONF_DEVICE_THRESHOLD, DEFAULT_DEVICE_THRESHOLD):
+                return None
+            area_id = areas[d["room"]]
+        else:
+            area_id = None
+        candidates = []
+        for eid in dict.fromkeys(devices.values()):
+            state = self.hass.states.get(eid)
+            if eid.split(".")[0] not in KINDS[kind] or state is None:
+                continue
+            if area_id is not None and self._area_of(eid) != area_id:
+                continue
+            candidates.append((eid, state))
+        # groups: use a group when some of its members aren't candidates themselves (e.g. not exposed), and then
+        # skip the members it covers; a group whose members are all candidates is skipped (no double commands)
+        listed = {eid for eid, _ in candidates}
+        covered: set[str] = set()
+        chosen = []
+        for eid, _state in candidates:
+            leaves = self._leaves(eid)
+            if leaves != {eid}:   # a group (possibly of groups)
+                if leaves <= listed:
+                    continue
+                covered |= leaves
+            chosen.append(eid)
+        targets = []
+        for eid in chosen:
+            if eid in covered:
+                continue
+            if (call := self._plan(action, eid, result, user_input.text)) is not None:
+                targets.append((eid, call))
+        area_name = ar.async_get(self.hass).async_get_area(area_id).name if area_id else None
+        where = f"in the {area_name}" if area_name else "in the house"
+        _LOGGER.info("'%s' -> %s %s %s %s: %d targets in %.0f ms", user_input.text, action, kind, scope, area_name,
+                     len(targets), (time.monotonic() - start) * 1000)
+        response = intent.IntentResponse(language=user_input.language)
+        if not targets:
+            response.async_set_speech(f"There are no {kind} {where} that can do that.")
+            return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
+        for eid, (domain, service, data, _shown) in targets:
+            await self.hass.services.async_call(domain, service, {"entity_id": eid, **data}, blocking=False,
+                                                context=user_input.context)
+        singular = {"lights": "light", "shades": "shade", "switches": "switch", "fans": "fan"}[kind]
+        n = len(set().union(*(self._leaves(eid) for eid, _ in targets)))   # real devices, groups expanded
+        count = f"{n} {kind}" if n > 1 else f"1 {singular}"
+        shown = targets[0][1][3]
+        tail = {"set_brightness": f" to {shown}%", "set_color": f" to {shown}",
+                "set_temperature": f" to {shown} K"}.get(action, "")
+        response.async_set_speech(f"{VERB[action]} {count} {where}{tail}.")
+        return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
+
     async def async_process(self, user_input: conversation.ConversationInput) -> conversation.ConversationResult:
         start = time.monotonic()
         devices = self._devices()
-        result = await self._decide(user_input.text, devices) if devices else None
+        areas = {a.name: a.id for a in ar.async_get(self.hass).async_list_areas()}
+        result = await self._decide(user_input.text, devices, list(areas)[:250]) if devices else None
+        if result and (multi := await self._try_multi(user_input, result, devices, areas, start)):
+            return multi
         if result:
             action = result["decision"].get("action")
             device = result["decision"].get("device")
@@ -268,7 +386,7 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                 response = intent.IntentResponse(language=user_input.language)
                 response.async_set_speech(DONE[action].format(device, shown))
                 return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
-        # not a confident single-device command: let the fallback agent handle it as before
+        # not a confident command: let the fallback agent handle it as before
         return await conversation.async_converse(
             self.hass, user_input.text, user_input.conversation_id, user_input.context,
             language=user_input.language, agent_id=self._opt(CONF_FALLBACK_AGENT, DEFAULT_FALLBACK_AGENT),
