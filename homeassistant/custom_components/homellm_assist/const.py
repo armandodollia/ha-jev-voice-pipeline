@@ -21,7 +21,13 @@ ACTIONS = {
     "close": {"cover": "close_cover"},
 }
 # light settings (action -> light.turn_on with brightness_pct / color_name / color_temp_kelvin)
-LIGHT_ACTIONS = ("set_brightness", "set_color", "set_temperature")
+LIGHT_ACTIONS = ("set_brightness", "brighten", "dim", "set_color", "set_temperature")
+# brightness the user can name: every 1% up to 20 (night-light levels), then steps of 5
+BRIGHTNESS_STEPS = [*range(0, 21), *range(25, 101, 5)]
+# relative brightness change in percentage points; words map to amounts, no amount means DEFAULT_STEP
+STEP_WORDS = {"a_little": 10, "a_lot": 40}
+STEP_AMOUNTS = ["5", "10", "15", "20", "25", "30", "40", "50"]
+DEFAULT_STEP = 20
 COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta", "pink", "white"]
 # spoken white temperatures; words map to Kelvin, numbers are Kelvin
 KELVIN_WORDS = {"warm": 2700, "soft": 2700, "neutral": 4000, "cool": 5000, "daylight": 6500}

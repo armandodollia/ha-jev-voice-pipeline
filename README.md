@@ -246,10 +246,23 @@ example automation.
 ### 3.7 Decision-first Assist agent (optional): no hallucinated devices
 `homeassistant\custom_components\homellm_assist` is a conversation agent for your Assist pipeline. For every request
 it first asks the local model a Jev-mode decision with two fixed-choice questions:
-- **action:** turn_on, turn_off, open, close, set_brightness, set_color, set_temperature or other
+- **action:** turn_on, turn_off, open, close, set_brightness, brighten, dim, set_color, set_temperature or other
 - **device:** one of the devices exposed to Assist (names and aliases), or none
-- **values:** brightness (0–100 in steps of 5), colour (red, orange, yellow, green, cyan, blue, purple, magenta,
-  pink, white), white temperature (warm/soft 2700 K, neutral 4000, cool 5000, daylight 6500, or 2000–6500 K)
+- **values:** colour (red, orange, yellow, green, cyan, blue, purple, magenta, pink, white), white temperature
+  (warm/soft 2700 K, neutral 4000, cool 5000, daylight 6500, or 2000–6500 K), and brightness
+
+**Brightness:**
+- **A spoken percentage is read straight from the text** ("5%", "5 percent", "twenty five percent"), so any value
+  from 0 to 100 is exact. Scoring digit strings confuses 5 with 50 and 1 with 100. The model's own guess (1% steps to
+  20, then steps of 5) is only used when no number was said.
+- **brighten / dim** change brightness by the amount said:
+  - "by 30 percent": 30 points
+  - "a little": 10
+  - "a lot": 40
+  - nothing: 20 (in practice the model usually picks "a little")
+- **Limits:** dimming stops at 1%, never off. Brightening an off light turns it on at that amount. "Dim ... to 12
+  percent" sets 12%.
+- With a spoken percentage, the action threshold drops to 0.5, because set, dim and brighten all reach the same level.
 
 The model can only answer with those values, so it can't invent a device. The agent runs the action and replies (e.g.
 "Set Office Lights to 40%.") in 0.1–0.6 s when all of these hold:
@@ -257,8 +270,7 @@ The model can only answer with those values, so it can't invent a device. The ag
 - they fit together: lights, switches, fans and scripts turn on/off; covers open/close;
 - the light supports the setting (brightness, colour, or colour temperature, clamped to the light's range).
 
-Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative changes ("dimmer", "a bit
-warmer"), several devices, unknown devices and low-confidence answers. Locks, alarms and garage/gate/door covers are
+Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers. Locks, alarms and garage/gate/door covers are
 never on the fast path.
 
 Setup:
