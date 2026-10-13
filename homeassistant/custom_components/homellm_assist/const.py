@@ -20,5 +20,14 @@ ACTIONS = {
     "open": {"cover": "open_cover"},
     "close": {"cover": "close_cover"},
 }
+# light settings (action -> light.turn_on with brightness_pct / color_name / color_temp_kelvin)
+LIGHT_ACTIONS = ("set_brightness", "set_color", "set_temperature")
+COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta", "pink", "white"]
+# spoken white temperatures; words map to Kelvin, numbers are Kelvin
+KELVIN_WORDS = {"warm": 2700, "soft": 2700, "neutral": 4000, "cool": 5000, "daylight": 6500}
+KELVIN_STEPS = ["2000", "2200", "2500", "2700", "3000", "3500", "4000", "4500", "5000", "5500", "6000", "6500"]
+CONF_VALUE_THRESHOLD = "value_threshold"
+DEFAULT_VALUE_THRESHOLD = 0.5
+
 # security-sensitive covers stay with the fallback agent (and its confirmations)
 EXCLUDED_COVER_CLASSES = {"garage", "gate", "door"}

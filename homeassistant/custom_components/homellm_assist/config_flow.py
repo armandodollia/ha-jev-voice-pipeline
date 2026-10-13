@@ -11,10 +11,12 @@ from .const import (
     CONF_DECISION_URL,
     CONF_DEVICE_THRESHOLD,
     CONF_FALLBACK_AGENT,
+    CONF_VALUE_THRESHOLD,
     DEFAULT_ACTION_THRESHOLD,
     DEFAULT_DECISION_URL,
     DEFAULT_DEVICE_THRESHOLD,
     DEFAULT_FALLBACK_AGENT,
+    DEFAULT_VALUE_THRESHOLD,
     DOMAIN,
 )
 
@@ -27,6 +29,8 @@ def _schema(d: dict) -> vol.Schema:
         vol.Required(CONF_ACTION_THRESHOLD, default=d.get(CONF_ACTION_THRESHOLD, DEFAULT_ACTION_THRESHOLD)):
             vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
         vol.Required(CONF_DEVICE_THRESHOLD, default=d.get(CONF_DEVICE_THRESHOLD, DEFAULT_DEVICE_THRESHOLD)):
+            vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+        vol.Required(CONF_VALUE_THRESHOLD, default=d.get(CONF_VALUE_THRESHOLD, DEFAULT_VALUE_THRESHOLD)):
             vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
     })
 

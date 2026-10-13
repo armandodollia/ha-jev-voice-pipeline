@@ -8,11 +8,14 @@
           "decision_url": "Decision endpoint (llama-server /v1/decision)",
           "fallback_agent": "Fallback conversation agent",
           "action_threshold": "Minimum confidence for the action (0-1)",
-          "device_threshold": "Minimum confidence for the device (0-1)"
+          "device_threshold": "Minimum confidence for the device (0-1)",
+          "value_threshold": "Minimum confidence for brightness / colour / white temperature (0-1)"
         }
       }
     },
-    "abort": { "already_configured": "Already set up" }
+    "abort": {
+      "already_configured": "Already set up"
+    }
   },
   "options": {
     "step": {
@@ -22,7 +25,8 @@
           "decision_url": "Decision endpoint (llama-server /v1/decision)",
           "fallback_agent": "Fallback conversation agent",
           "action_threshold": "Minimum confidence for the action (0-1)",
-          "device_threshold": "Minimum confidence for the device (0-1)"
+          "device_threshold": "Minimum confidence for the device (0-1)",
+          "value_threshold": "Minimum confidence for brightness / colour / white temperature (0-1)"
         }
       }
     }
