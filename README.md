@@ -271,7 +271,13 @@ The model can only answer with those values, so it can't invent a device. The ag
 - the light supports the setting (brightness, colour, or colour temperature, clamped to the light's range).
 
 Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers. Locks, alarms and garage/gate/door covers are
-never on the fast path.
+**Doors and locks** (locks, garage/gate/door covers):
+- **Allowed actions:** open/close or lock/unlock, one device at a time.
+- **Stricter confidence:** the action and the device must both be at least 0.9 sure (Configure → security
+  threshold).
+- **No-op check:** a command is only sent when it would change the state ("Main Garage Door is already closed"), because
+  many garage openers use one toggle pulse for both open and close.
+- **Excluded from room and house commands.** Alarms are never on the fast path.
 
 **Rooms:** the same decision call also asks for a **scope**, a **device kind** and a **room**:
 

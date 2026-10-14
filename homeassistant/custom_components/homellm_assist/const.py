@@ -6,11 +6,14 @@ CONF_DECISION_URL = "decision_url"
 CONF_FALLBACK_AGENT = "fallback_agent"
 CONF_ACTION_THRESHOLD = "action_threshold"
 CONF_DEVICE_THRESHOLD = "device_threshold"
+CONF_SECURITY_THRESHOLD = "security_threshold"
 
 DEFAULT_DECISION_URL = "http://192.168.1.33:8080/v1/decision"
 DEFAULT_FALLBACK_AGENT = "conversation.local_llm_server_home_ai_agent"
 DEFAULT_ACTION_THRESHOLD = 0.7
 DEFAULT_DEVICE_THRESHOLD = 0.6
+# locks and garage/gate/door covers: both the action and the device must be at least this sure
+DEFAULT_SECURITY_THRESHOLD = 0.9
 
 # What each spoken action does per domain. Domains or device classes not listed here are never handled by the
 # fast path; those requests (and anything uncertain) go to the fallback agent.
@@ -19,6 +22,8 @@ ACTIONS = {
     "turn_off": {"light": "turn_off", "switch": "turn_off", "fan": "turn_off", "cover": "close_cover"},
     "open": {"cover": "open_cover"},
     "close": {"cover": "close_cover"},
+    "lock": {"lock": "lock"},
+    "unlock": {"lock": "unlock"},
 }
 # light settings (action -> light.turn_on with brightness_pct / color_name / color_temp_kelvin)
 LIGHT_ACTIONS = ("set_brightness", "brighten", "dim", "set_color", "set_temperature")
@@ -39,5 +44,5 @@ DEFAULT_VALUE_THRESHOLD = 0.5
 KINDS = {"lights": ("light",), "shades": ("cover",), "switches": ("switch",), "fans": ("fan",)}
 SCOPES = ["one_device", "this_room", "named_room", "whole_house"]
 
-# security-sensitive covers stay with the fallback agent (and its confirmations)
+# security-sensitive covers: open/close only, with the security threshold, never in room/house commands
 EXCLUDED_COVER_CLASSES = {"garage", "gate", "door"}

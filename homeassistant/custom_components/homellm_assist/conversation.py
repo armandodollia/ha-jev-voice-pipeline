@@ -28,11 +28,13 @@ from .const import (
     CONF_DECISION_URL,
     CONF_DEVICE_THRESHOLD,
     CONF_FALLBACK_AGENT,
+    CONF_SECURITY_THRESHOLD,
     CONF_VALUE_THRESHOLD,
     DEFAULT_ACTION_THRESHOLD,
     DEFAULT_DECISION_URL,
     DEFAULT_DEVICE_THRESHOLD,
     DEFAULT_FALLBACK_AGENT,
+    DEFAULT_SECURITY_THRESHOLD,
     DEFAULT_VALUE_THRESHOLD,
     DOMAIN,
     EXCLUDED_COVER_CLASSES,
@@ -49,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "You are the voice assistant of a home. Read what the user said and answer each question. "
-    "If the user asks to switch, open or close exactly one device from the list, or to set the brightness, colour "
+    "If the user asks to switch, open, close, lock or unlock exactly one device from the list, or to set the brightness, colour "
     "or white temperature of exactly one light from the list, pick that action and device, and the value they asked "
     "for. Brightness is a percentage. Use brighten or dim for relative changes (brighter, dimmer, turn it up/down) "
     "and give the amount if the user said one (a little, a lot, or percentage points). "
@@ -65,8 +67,10 @@ INSTRUCTIONS = (
     "Answer 'none' for values the user did not ask for."
 )
 VERB = {"turn_on": "Turned on", "turn_off": "Turned off", "open": "Opened", "close": "Closed",
+        "lock": "Locked", "unlock": "Unlocked",
         "set_brightness": "Set", "brighten": "Brightened", "dim": "Dimmed", "set_color": "Set", "set_temperature": "Set"}
 DONE = {"turn_on": "Turned on {}.", "turn_off": "Turned off {}.", "open": "Opening {}.", "close": "Closing {}.",
+        "lock": "Locking {}.", "unlock": "Unlocking {}.",
         "set_brightness": "Set {} to {}%.",
         "brighten": "Brightened {} to {}%.", "dim": "Dimmed {} to {}%.", "set_color": "Set {} to {}.", "set_temperature": "Set {} to {} K."}
 _ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
@@ -182,6 +186,14 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             parts.append(f"{name} ({', '.join(member_names)})")
         return (" Groups (one name that controls several devices together): " + "; ".join(parts) + ".") if parts else ""
 
+    def _is_secure(self, eid: str) -> bool:
+        """Locks and garage/gate/door covers: stricter threshold, open/close or lock/unlock only, single device only."""
+        domain = eid.split(".")[0]
+        if domain == "lock":
+            return True
+        state = self.hass.states.get(eid)
+        return domain == "cover" and state is not None and state.attributes.get("device_class") in EXCLUDED_COVER_CLASSES
+
     def _speaker_area(self, user_input: conversation.ConversationInput) -> str | None:
         """Area of the voice device that heard the request (None from phones, the watch, the web UI)."""
         device_id = user_input.device_id
@@ -202,8 +214,6 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             domain = eid.split(".")[0]
             if domain not in allowed or not async_should_expose(self.hass, conversation.DOMAIN, eid):
                 continue
-            if domain == "cover" and state.attributes.get("device_class") in EXCLUDED_COVER_CLASSES:
-                continue
             entry = reg.async_get(eid)
             # aliases may also hold a marker for "the entity's own name" (not a str): skip it, state.name covers it
             aliases = sorted(a for a in (entry.aliases if entry else []) if isinstance(a, str))
@@ -219,7 +229,7 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             "instructions": INSTRUCTIONS + self._group_note(devices),
             "schema": {
                 "action": {"type": "enum",
-                           "choices": ["turn_on", "turn_off", "open", "close", *LIGHT_ACTIONS, "other"],
+                           "choices": ["turn_on", "turn_off", "open", "close", "lock", "unlock", *LIGHT_ACTIONS, "other"],
                            "description": "What does the user want done?"},
                 "device": {"type": "enum", "choices": [*devices.keys(), "none"],
                            "description": "Which single device from the list is the user talking about?"},
@@ -258,6 +268,8 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
         """(domain, service, extra data, spoken value) for a confident, supported command, else None."""
         domain = eid.split(".")[0]
         if action not in LIGHT_ACTIONS:
+            if self._is_secure(eid) and action not in ("open", "close", "lock", "unlock"):
+                return None   # e.g. "turn on the garage door": too loose for a door or a lock
             service = ACTIONS.get(action, {}).get(domain)
             return (domain, service, {}, "") if service else None
         state = self.hass.states.get(eid)
@@ -329,8 +341,8 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
         candidates = []
         for eid in dict.fromkeys(devices.values()):
             state = self.hass.states.get(eid)
-            if eid.split(".")[0] not in KINDS[kind] or state is None:
-                continue
+            if eid.split(".")[0] not in KINDS[kind] or state is None or self._is_secure(eid):
+                continue   # other kind, or a door/lock (those only ever go one at a time)
             if area_id is not None and self._area_of(eid) != area_id:
                 continue
             candidates.append((eid, state))
@@ -391,17 +403,31 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                 # with a spoken number the model often splits between set/dim/brighten; all of them end in the
                 # same exact level, so a weaker majority is enough
                 action_threshold = min(action_threshold, 0.5)
-            ok = (call is not None and p_action >= action_threshold
-                  and p_device >= self._opt(CONF_DEVICE_THRESHOLD, DEFAULT_DEVICE_THRESHOLD))
+            device_threshold = self._opt(CONF_DEVICE_THRESHOLD, DEFAULT_DEVICE_THRESHOLD)
+            if eid and self._is_secure(eid):
+                secure = self._opt(CONF_SECURITY_THRESHOLD, DEFAULT_SECURITY_THRESHOLD)
+                action_threshold, device_threshold = max(action_threshold, secure), max(device_threshold, secure)
+            ok = (call is not None and p_action >= action_threshold and p_device >= device_threshold)
             _LOGGER.info("'%s' -> %s %.2f / %s (%s) %.2f / %s -> %s in %.0f ms", user_input.text, action, p_action,
                          device, eid, p_device,
                          {k: result["decision"].get(k) for k in ("brightness", "step", "color", "temperature")},
                          call if ok else "fallback", (time.monotonic() - start) * 1000)
             if ok:
                 domain, service, data, shown = call
+                response = intent.IntentResponse(language=user_input.language)
+                # doors and locks: only send a command that changes something. Some garage openers use one toggle
+                # pulse for open and close, so "close" on a closed door would open it.
+                already = {"open": ("open", "opening"), "close": ("closed", "closing"),
+                           "lock": ("locked", "locking"), "unlock": ("unlocked", "unlocking")}.get(action, ())
+                current = self.hass.states.get(eid)
+                if self._is_secure(eid) and current is not None and current.state in already:
+                    response.async_set_speech(f"{device} is already {current.state}.")
+                    return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
+                if self._is_secure(eid) and (current is None or current.state in ("unavailable", "unknown")):
+                    response.async_set_speech(f"{device} is {current.state if current else 'unavailable'}, so I left it alone.")
+                    return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
                 await self.hass.services.async_call(domain, service, {"entity_id": eid, **data}, blocking=True,
                                                     context=user_input.context)
-                response = intent.IntentResponse(language=user_input.language)
                 response.async_set_speech(DONE[action].format(device, shown))
                 return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
         # not a confident command: let the fallback agent handle it as before
