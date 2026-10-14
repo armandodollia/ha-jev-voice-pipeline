@@ -426,8 +426,9 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                 if self._is_secure(eid) and (current is None or current.state in ("unavailable", "unknown")):
                     response.async_set_speech(f"{device} is {current.state if current else 'unavailable'}, so I left it alone.")
                     return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
-                await self.hass.services.async_call(domain, service, {"entity_id": eid, **data}, blocking=True,
-                                                    context=user_input.context)
+                # doors and locks can be slow (cloud car locks take 10-30 s): send without waiting for them
+                await self.hass.services.async_call(domain, service, {"entity_id": eid, **data},
+                                                    blocking=not self._is_secure(eid), context=user_input.context)
                 response.async_set_speech(DONE[action].format(device, shown))
                 return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
         # not a confident command: let the fallback agent handle it as before
