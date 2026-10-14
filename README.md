@@ -270,7 +270,8 @@ The model can only answer with those values, so it can't invent a device. The ag
 - they fit together: lights, switches, fans and scripts turn on/off; covers open/close;
 - the light supports the setting (brightness, colour, or colour temperature, clamped to the light's range).
 
-Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers. Locks, alarms and garage/gate/door covers are
+Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers.
+
 **Doors and locks** (locks, garage/gate/door covers):
 - **Allowed actions:** open/close or lock/unlock, one device at a time.
 - **Stricter confidence:** the action and the device must both be at least 0.9 sure (Configure → security
