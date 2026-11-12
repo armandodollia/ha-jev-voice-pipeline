@@ -17,6 +17,10 @@
 # at once, but the smaller tier's model, upgrades and crash restarts wait until the activity ends. Loading a model
 # mid-game triggered GPU driver resets (TDR) on an RTX 4090 9-16 s after the load began. Outside games, a downgrade
 # unloads at once and loads the smaller model llm.downgradeLoadDelaySec later.
+# Optional per-tier fields: upgradeMarginMiB (overrides vram.upgradeMarginMiB for that tier) and remoteStt=true: the
+# tier has no room for local Whisper, so it is allowed only while a worker's Whisper is healthy (orchestrator with
+# cluster.preferWorkers ["stt", ...]; read from router.py's state\router.json). If the worker's Whisper is gone for
+# 8 s, the supervisor drops to the next tier, starts local Whisper first and loads that tier's model 20 s later.
 # Runs at boot as the SYSTEM scheduled task "HomeLLM" (see install.ps1).
 param([switch]$DryRun)   # -DryRun: print tiers, VRAM, detected game folders and the tier that would be chosen
 
@@ -33,6 +37,8 @@ $OverrideFile = Join-Path $paths.State 'override.txt'
 $StatusFile   = Join-Path $paths.State 'status.json'
 $ExtraGames   = Join-Path $paths.Root 'games.txt'
 $IgnoreFile   = Join-Path $paths.Root 'ignore.txt'
+$RouterState  = Join-Path $paths.State 'router.json'   # router.py's view: is a worker's Whisper healthy?
+$RemoteSttDownSec = 8                                  # leave a remoteStt tier after the worker's Whisper is down this long
 $Margin       = $(if ($cfg.vram.upgradeMarginMiB) { [int]$cfg.vram.upgradeMarginMiB } else { 1536 })
 $Headroom     = $(if ($cfg.vram.headroomMiB) { [int]$cfg.vram.headroomMiB } else { 1024 })
 $LoadDelay    = $(if ($null -ne $cfg.llm.downgradeLoadDelaySec) { [int]$cfg.llm.downgradeLoadDelaySec } else { 60 })
@@ -66,7 +72,8 @@ foreach ($t in Get-TierConfig) {
     # first-guess footprint: weights + ~25% for context/compute buffers; replaced by the measured value once loaded
     $est = $(if ($file -and (Test-Path $file)) { [int]((Get-Item $file).Length / 1MB * 1.25) + 512 } else { 0 })
     $Tiers[$t.name] = @{ Model = $t.model; Max = $(if ($t.maxOthersMiB) { [int]$t.maxOthersMiB } else { [int]::MaxValue })
-                         Whisper = [bool]$t.whisper -and [bool]$cfg.voice.enabled; EstLlm = $est }
+                         Whisper = [bool]$t.whisper -and [bool]$cfg.voice.enabled; EstLlm = $est
+                         RemoteStt = [bool]$t.remoteStt; Margin = $(if ($t.upgradeMarginMiB) { [int]$t.upgradeMarginMiB } else { $Margin }) }
 }
 $TierNames  = @($Tiers.Keys)
 $EstWhisper = 1500
@@ -180,13 +187,25 @@ function Get-AllowedTier($vram, $current) {
     if ($currentIdx -lt 0) { $currentIdx = $TierNames.Count }
     for ($i = 0; $i -lt $TierNames.Count; $i++) {
         $t = $Tiers[$TierNames[$i]]
+        if ($t.RemoteStt -and -not $script:RemoteSttOk) { continue }
         if ($i -lt $currentIdx) {
             $need = $(if ($t.Model) { $t.EstLlm } else { 0 }) + $(if ($t.Whisper) { $EstWhisper } else { 0 })
-            if ($vram.Others + $Margin -lt $t.Max -and $vram.Others + $need + $Headroom -le $vram.Total) { return $TierNames[$i] }
+            if ($vram.Others + $t.Margin -lt $t.Max -and $vram.Others + $need + $Headroom -le $vram.Total) { return $TierNames[$i] }
         }
         elseif ($vram.Others -lt $t.Max) { return $TierNames[$i] }
     }
     $TierNames[-1]
+}
+
+# True while some worker's Whisper is healthy per router.py (fresh state file, any non-local stt backend up).
+function Test-RemoteStt {
+    if ($IsWorker) { return $false }
+    try {
+        $r = Get-Content $RouterState -Raw | ConvertFrom-Json
+        if (((Get-Date) - [datetime]$r.time).TotalSeconds -gt 30) { return $false }
+        foreach ($p in $r.backends.stt.PSObject.Properties) { if ($p.Name -ne 'local' -and $p.Value) { return $true } }
+        $false
+    } catch { $false }
 }
 
 # Worker: what the orchestrator wants loaded. Keeps the last answer through short outages; after 60 s without an
@@ -228,10 +247,11 @@ function Test-SameServer($a, $b) {
 }
 
 $roots = Get-GameRoots
+$RemoteSttOk  = Test-RemoteStt   # worker Whisper usable (debounced: down only after $RemoteSttDownSec)
 if ($DryRun) {
     "tiers:"; foreach ($n in $TierNames) { $t = $Tiers[$n]
-        "  {0,-6} others < {1,-6} model {2} (~{3} MiB) whisper {4}" -f $n, $(if ($t.Max -eq [int]::MaxValue) { '-' } else { $t.Max }),
-            $(if ($t.Model) { $t.Model.file } else { '-' }), $t.EstLlm, $t.Whisper }
+        "  {0,-6} others < {1,-6} model {2} (~{3} MiB) whisper {4}{5}" -f $n, $(if ($t.Max -eq [int]::MaxValue) { '-' } else { $t.Max }),
+            $(if ($t.Model) { $t.Model.file } else { '-' }), $t.EstLlm, $t.Whisper, $(if ($t.RemoteStt) { " (needs a worker's Whisper: $(if ($RemoteSttOk) { 'healthy' } else { 'not available' }))" }) }
     $v = Get-Vram
     if ($v) { "VRAM: used $($v.Used) / $($v.Total) MiB; llama-server $($v.Llm), Whisper $($v.Whisper), others $($v.Others)"
               "tier now: $(Get-AllowedTier $v 'none')" } else { 'VRAM: unreadable (nvidia-smi / GPU counters)' }
@@ -246,6 +266,7 @@ $current = $null; $proc = $null; $since = Get-Date
 $upgradeFrom = $null; $failures = 0; $rootsAge = Get-Date; $activity = 'idle'
 $startAt    = $null   # delayed model start after a downgrade
 $deferStart = $false  # model start postponed until the game/stream ends
+$remoteDownAt = $null
 
 while ($true) {
     try {
@@ -254,6 +275,11 @@ while ($true) {
         if ($newActivity -ne $activity) { Write-Log "activity: $newActivity"; $activity = $newActivity }
 
         $vram = Get-Vram
+        if (Test-RemoteStt) { $remoteDownAt = $null; $RemoteSttOk = $true }
+        elseif ($RemoteSttOk) {
+            if (-not $remoteDownAt) { $remoteDownAt = Get-Date }
+            elseif (((Get-Date) - $remoteDownAt).TotalSeconds -ge $RemoteSttDownSec) { $RemoteSttOk = $false; Write-Log 'worker Whisper down: remoteStt tiers not allowed' }
+        }
         $override = Get-Override
         if ($override) { $desired = $override; $reason = 'manual override' }
         elseif ($null -eq $vram) { $desired = $(if ($current) { $current } else { $TierNames[0] }); $reason = 'VRAM unreadable, keeping tier' }
@@ -302,6 +328,11 @@ while ($true) {
                 if ($hasModel -and -not $manual -and $busy) {
                     $deferStart = $true
                     Write-Log "$desired model loads after the $activity ends"
+                } elseif ($hasModel -and -not $manual -and $isDowngrade -and $Tiers[$current].RemoteStt -and -not $RemoteSttOk) {
+                    # voice moved back here: local Whisper starts now (gpu_released clears in this loop's status); the
+                    # LLM loads 20 s later so the two CUDA loads don't slow each other (measured: 78 s STT gap otherwise)
+                    $startAt = (Get-Date).AddSeconds(20)
+                    Write-Log "worker Whisper gone: local Whisper first, $desired model loads in 20 s"
                 } elseif ($hasModel -and -not $manual -and $isDowngrade -and $LoadDelay -gt 0) {
                     $startAt = (Get-Date).AddSeconds($LoadDelay)
                     Write-Log "unloaded; $desired model loads in $LoadDelay s"

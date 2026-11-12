@@ -114,6 +114,8 @@ Give the PC a **DHCP reservation** in your router so its LAN address doesn't cha
 | `llm.tiers[]` | full / small / voice / none | best first: `name`, `maxOthersMiB` (tier allowed while other programs use less), `whisper`, optional `model` |
 | `llm.tiers[].model.repo/file` | Gemma 4 12B / Qwen3.5 4B | any GGUF on Hugging Face; `ctx`, `decisionSeqs`, `chatTemplateKwargs`, `extraArgs` per model |
 | `llm.tiers[].model.chatTemplateKwargs` | `{"enable_thinking": false}` | keep thinking off for voice (thinking makes replies ~4x slower) |
+| `llm.tiers[].remoteStt` | false | tier has no room for local Whisper: allowed only while a worker's Whisper is healthy (see [Bigger model with a worker doing speech](#bigger-model-with-a-worker-doing-speech)) |
+| `llm.tiers[].upgradeMarginMiB` | `vram.upgradeMarginMiB` | per-tier upgrade margin (a tight top tier needs a smaller one) |
 | `llm.upgradeDelaySec` | 90 | how long other programs' usage must stay low before a bigger tier loads |
 | `llm.downgradeLoadDelaySec` | 60 | outside games: wait this long after a downgrade's unload before loading the smaller model |
 | `llm.noLoadsDuringActivity` | true | while a game/stream runs, only unload; loads, upgrades and crash restarts wait until it ends |
@@ -463,6 +465,35 @@ Assistant and the apps keep pointing at the main PC (the **orchestrator**) and n
   its network adapter. It can't revive a PC that has frozen.
 - **Check it:** `.\status.ps1` on either PC shows the routing and worker state; `http://<orchestrator>:8079/status` shows routes, backend health, what's wanted, and the workers'
   last poll; `logs\router.log` logs every switch.
+
+### Bigger model with a worker doing speech
+
+With a worker serving Whisper and Piper (`cluster.preferWorkers: ["stt", "tts"]`), the main GPU can hold a 27B model
+with a context long enough for coding agents. Put a `remoteStt` tier first; it is allowed only while a worker's
+Whisper is healthy (the router's `stateouter.json`). If the worker's Whisper is gone for 8 s, the supervisor drops
+to the next tier, starts local Whisper at once and loads that tier's model 20 s later, so voice keeps working.
+
+Running on an RTX 4090 (24 GB) since 2026-11-11: [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b)
+(UkisAI's reasoning-efficient Qwen3.8 27B: fewer thinking tokens, better agentic coding scores) at a 96K context:
+
+```json
+{ "name": "max", "maxOthersMiB": 2304, "upgradeMarginMiB": 768, "whisper": false, "remoteStt": true,
+  "model": { "repo": "ukisai/Swift-1.5-Qwen3.8-27B-GGUF", "file": "Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf",
+    "ctx": 98304, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false } } },
+```
+
+- **Context size.** Coding agents need 64K at the very least (system prompt and tool definitions alone are 15–25K
+  tokens); 96K is the largest that fits beside a normal desktop. Qwen3.8 27B only has full attention on every 4th
+  layer, so the q8_0 KV cache costs ~33 KB per token: 64K ≈ 20.7 GB in total, 96K ≈ 21.7 GB, 128K ≈ 22.9 GB
+  (too tight; `-ctk q4_0 -ctv q4_0` would fit it at some cost to long-context recall).
+- **Limits.** 24.5 GB − 21.7 GB leaves ~2.8 GB, so the tier is allowed while other programs use under 2.3 GB, and
+  loads only below 1.5 GB (idle desktop: 0.2–0.9 GB). A browser video or a game drops it to the next tier.
+- **Thinking per caller.** Keep `enable_thinking: false` as the server default so Home Assistant voice and Jev
+  decisions stay fast. An agent that wants reasoning turns it on per request with
+  `"chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "medium"}` (the Qwen3.8 template accepts
+  `low`, `medium` and `xhigh`); llama-server merges it over the default for that request only.
+- **License.** Swift 1.5 is under the Swift Open License v1.0: free for personal use and for organisations under
+  US$1M revenue; read it before using it commercially.
 
 Example worker tiers for a 10 GB card: `small` (Qwen3.5 4B + Whisper) while other programs use < 2.5 GB, `voice`
 (Whisper only) < 7.5 GB, then `none`; `activityMaxTier: "voice"`; margins 512 MiB. Gemma 12B doesn't fit in 10 GB.

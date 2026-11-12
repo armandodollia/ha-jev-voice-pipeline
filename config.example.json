@@ -77,6 +77,8 @@
     "_workers": "mac (optional): the orchestrator wakes the worker with Wake-on-LAN while it needs it and the worker hasn't checked in for 20 s",
     "requestAfterSec": 15,
     "releaseAfterSec": 60,
+    "preferWorkers": [],
+    "_preferWorkers": "kinds (\"stt\", \"tts\") that always go to a healthy worker first, freeing this GPU for a bigger LLM tier (README > Bigger model with a worker doing speech); \"tts\" also needs localPorts.tts",
     "name": "",
     "orchestrator": ""
   },
