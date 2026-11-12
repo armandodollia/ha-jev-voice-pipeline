@@ -1,11 +1,15 @@
 """Model router for a multi-PC setup: the orchestrator PC keeps the public ports (LLM 8080, Wyoming STT 10300) and
-forwards each connection to its own llama-server/Whisper or to a worker PC's. Clients (Home Assistant, the speech API,
-phone apps) keep using the orchestrator's address and never see the switch.
+forwards each connection to its own llama-server/Whisper/Piper or to a worker PC's. Clients (Home Assistant, the
+speech API, phone apps) keep using the orchestrator's address and never see the switch. Kinds: llm, stt (Wyoming
+Whisper) and, when configured, tts (Wyoming Piper).
 
 Routing, per new connection (TCP level, so streaming, Jev-mode /v1/decision and Wyoming all pass through untouched):
   - while a game/stream runs on the orchestrator (status.json activity) and a worker is healthy -> the worker,
     so inference doesn't compete with the game for the GPU
   - otherwise the local backend if it's healthy, else the first healthy worker, else the local backend anyway
+  - kinds listed in preferWorkers (e.g. ["stt", "tts"]) always go to a healthy worker first, so the orchestrator's GPU
+    is free for a bigger LLM; the local backend is the fallback. Workers are kept asked for them all the time, but
+    Wake-on-LAN is only sent for real need (game/stream, local down), so a worker that was shut down stays off.
 While no backend is healthy (a worker still loading), new connections wait up to waitForBackendSec instead of failing.
 Idle keep-alive connections to a backend that is no longer preferred are closed so clients reconnect to the new one.
 
@@ -31,13 +35,18 @@ if "listen" not in CFG:
     kit, root = CFG, Path(sys.argv[1]).resolve().parent
     cl, public_llm, public_stt = kit["cluster"], kit["llm"]["port"], kit["voice"]["ports"]["wyomingStt"]
     CFG = {
-        "listen": {"llm": public_llm, "stt": public_stt, "control": cl.get("controlPort", 8079)},
-        "local": {"llm": f"127.0.0.1:{cl['localPorts']['llm']}", "stt": f"127.0.0.1:{cl['localPorts']['stt']}"},
+        "listen": {"llm": public_llm, "stt": public_stt, "control": cl.get("controlPort", 8079),
+                   **({"tts": kit["voice"]["ports"]["wyomingTts"]} if cl["localPorts"].get("tts") else {})},
+        "local": {"llm": f"127.0.0.1:{cl['localPorts']['llm']}", "stt": f"127.0.0.1:{cl['localPorts']['stt']}",
+                  **({"tts": f"127.0.0.1:{cl['localPorts']['tts']}"} if cl["localPorts"].get("tts") else {})},
         "workers": [{"name": w["name"], "mac": w.get("mac"), "llm": f"{w['host']}:{w.get('llmPort', public_llm)}",
-                     "stt": f"{w['host']}:{w.get('sttPort', public_stt)}"} for w in cl.get("workers", [])],
+                     "stt": f"{w['host']}:{w.get('sttPort', public_stt)}",
+                     **({"tts": f"{w['host']}:{w.get('ttsPort', kit['voice']['ports']['wyomingTts'])}"}
+                        if cl["localPorts"].get("tts") else {})} for w in cl.get("workers", [])],
         "statusFile": str(root / "state" / "status.json"), "stateFile": str(root / "state" / "router.json"),
         "logFile": str(root / "logs" / "router.log"),
         "requestAfterSec": cl.get("requestAfterSec", 15), "releaseAfterSec": cl.get("releaseAfterSec", 60),
+        "preferWorkers": cl.get("preferWorkers", []),
         "waitForBackendSec": cl.get("waitForBackendSec", 30),
     }
 LOG = Path(CFG["logFile"])
@@ -46,7 +55,8 @@ STATE_FILE = Path(CFG["stateFile"])
 REQUEST_AFTER = CFG.get("requestAfterSec", 15)
 RELEASE_AFTER = CFG.get("releaseAfterSec", 60)
 WAIT_FOR_BACKEND = CFG.get("waitForBackendSec", 30)   # hold a new connection this long while no backend is up
-KINDS = ("llm", "stt")
+KINDS = ("llm", "stt") + (("tts",) if "tts" in CFG["listen"] and "tts" in CFG["local"] else ())
+PREFER = set(CFG.get("preferWorkers", [])) & set(KINDS)   # kinds that go to a healthy worker first
 
 
 def log(msg):
@@ -71,7 +81,8 @@ class Backend:
 
 BACKENDS = {k: [Backend("local", k, CFG["local"][k])] +
                [Backend(w["name"], k, w[k]) for w in CFG.get("workers", []) if w.get(k)] for k in KINDS}
-WANTED = {k: False for k in KINDS}
+WANTED = {k: False for k in KINDS}       # what workers are asked to load (need, or preferWorkers)
+NEEDED = {k: False for k in KINDS}       # real need: game/stream or local down (drives Wake-on-LAN)
 ROUTE = {k: "local" for k in KINDS}
 WORKER_SEEN = {}                          # worker name -> last /assignment poll (time, query)
 WOL = {w["name"]: w["mac"] for w in CFG.get("workers", []) if w.get("mac")}
@@ -93,7 +104,7 @@ def wake_workers():
     """While workers are wanted, wake any that hasn't polled in 20 s (asleep or off): Wake-on-LAN, resent every
     minute, up to WOL_MAX times until it shows up again."""
     now = time.monotonic()
-    wanted = WANTED["llm"] or WANTED["stt"]
+    wanted = NEEDED["llm"] or NEEDED["stt"]
     for name, mac in WOL.items():
         seen = WORKER_SEEN.get(name, (-1e9, None))[0]
         if not wanted or now - seen < 20:
@@ -144,7 +155,7 @@ async def check_stt(b):
 
 async def probe(b):
     try:
-        ok = await (check_llm(b) if b.kind == "llm" else check_stt(b))
+        ok = await (check_llm(b) if b.kind == "llm" else check_stt(b))   # stt and tts both speak Wyoming
     except Exception:
         ok = False
     if ok != b.healthy:
@@ -166,12 +177,14 @@ def order(kind):
     # workers first while a game/stream runs, and while the local supervisor is about to swap its model (and a bit
     # after), so nobody hits the local server mid-swap
     swapping = kind == "llm" and time.monotonic() - pending_seen < SWAP_GRACE
-    if (activity != "idle" or swapping) and up:
+    if (activity != "idle" or swapping or kind in PREFER) and up:
         return up + [local] + [w for w in workers if not w.healthy]
     return sorted(BACKENDS[kind], key=lambda b: not b.healthy)   # stable: local first among equals
 
 
 def update_wanted(kind):
+    if kind == "tts":
+        return                              # Piper runs on the CPU all the time; nothing to load or wake for
     local, now = BACKENDS[kind][0], time.monotonic()
     busy = activity != "idle"
     if busy or (not local.healthy and now - local.changed >= REQUEST_AFTER):
@@ -180,11 +193,14 @@ def update_wanted(kind):
         # (an upgrade still pending means the local model is about to be swapped: keep the worker through it)
         want = False
     else:
-        want = WANTED[kind]
+        want = NEEDED[kind]
+    NEEDED[kind] = want
+    want = want or kind in PREFER
     if want != WANTED[kind]:
         WANTED[kind] = want
         log(f"{kind}: {'asking workers to load' if want else 'releasing workers'} "
-            f"(activity {activity}, local {'up' if local.healthy else 'down'})")
+            f"(activity {activity}, local {'up' if local.healthy else 'down'}"
+            f"{', preferred on workers' if kind in PREFER else ''})")
 
 
 async def monitor():
@@ -211,7 +227,7 @@ async def monitor():
         wake_workers()
         STATE_FILE.write_text(json.dumps({
             "time": datetime.now().isoformat(timespec="seconds"), "activity": activity, "route": ROUTE,
-            "wanted": WANTED, "local_pending_upgrade": pending,
+            "wanted": WANTED, "needed": NEEDED, "prefer_workers": sorted(PREFER), "local_pending_upgrade": pending,
             "backends": {k: {b.name: b.healthy for b in BACKENDS[k]} for k in KINDS},
             "workers": {n: {"last_poll_s": round(now - t), **q} for n, (t, q) in WORKER_SEEN.items()},
             "connections": len(CONNS)}, indent=2), encoding="utf-8")
@@ -294,7 +310,8 @@ async def main():
     lst = CFG["listen"]
     servers = [await asyncio.start_server(proxy_handler(k), "0.0.0.0", lst[k]) for k in KINDS]
     servers.append(await asyncio.start_server(control, "0.0.0.0", lst["control"]))
-    log(f"router started: llm :{lst['llm']}, stt :{lst['stt']}, control :{lst['control']}; workers: "
+    log(f"router started: " + ", ".join(f"{k} :{lst[k]}" for k in KINDS) + f", control :{lst['control']}; "
+        f"preferred on workers: {', '.join(sorted(PREFER)) or 'none'}; workers: "
         + ", ".join(w["name"] for w in CFG.get("workers", [])))
     await asyncio.gather(monitor(), *(s.serve_forever() for s in servers))
 
