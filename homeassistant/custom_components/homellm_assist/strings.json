@@ -10,7 +10,8 @@
           "action_threshold": "Minimum confidence for the action (0-1)",
           "device_threshold": "Minimum confidence for the device (0-1)",
           "value_threshold": "Minimum confidence for brightness / colour / white temperature (0-1)",
-          "security_threshold": "Minimum confidence for locks and garage/gate/door covers, action and device (0-1)"
+          "security_threshold": "Minimum confidence for locks and garage/gate/door covers, action and device (0-1)",
+          "temperature_step": "Warmer / cooler step in Kelvin ('a little' = 0.6x, 'a lot' = 2x)"
         }
       }
     },
@@ -28,7 +29,8 @@
           "action_threshold": "Minimum confidence for the action (0-1)",
           "device_threshold": "Minimum confidence for the device (0-1)",
           "value_threshold": "Minimum confidence for brightness / colour / white temperature (0-1)",
-          "security_threshold": "Minimum confidence for locks and garage/gate/door covers, action and device (0-1)"
+          "security_threshold": "Minimum confidence for locks and garage/gate/door covers, action and device (0-1)",
+          "temperature_step": "Warmer / cooler step in Kelvin ('a little' = 0.6x, 'a lot' = 2x)"
         }
       }
     }

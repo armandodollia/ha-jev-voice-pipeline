@@ -211,7 +211,7 @@ if ($voiceOn) {
     $stt = Join-Path $paths.Voice 'stt'; $tts = Join-Path $paths.Voice 'tts'
     foreach ($venv in $stt, $tts) { if (-not (Test-Path "$venv\Scripts\python.exe")) { & $py -m venv $venv } }
     & "$stt\Scripts\python.exe" -m pip install -q --upgrade pip
-    & "$stt\Scripts\python.exe" -m pip install -q "wyoming-faster-whisper[hass]" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" websockets
+    & "$stt\Scripts\python.exe" -m pip install -q "wyoming-faster-whisper[hass]" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" websockets aiohttp
     if ($LASTEXITCODE -ne 0) { throw 'pip install failed for the speech-to-text environment' }
     & "$tts\Scripts\python.exe" -m pip install -q --upgrade pip
     & "$tts\Scripts\python.exe" -m pip install -q wyoming-piper
@@ -356,8 +356,43 @@ if (-not $SkipTasks) {
                 -LocalPort $(if ($cfg.cluster.controlPort) { $cfg.cluster.controlPort } else { 8079 }) `
                 -RemoteAddress $workerHosts -Action Allow | Out-Null
         }
+        Get-NetFirewallRule -DisplayName 'HomeRouter decision' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        if ($cfg.cluster.decisionPort) {
+            # README > Jev decisions on a worker: a second LLM port whose /v1/decision prefers a worker's model
+            New-NetFirewallRule -DisplayName 'HomeRouter decision' -Direction Inbound -Protocol TCP `
+                -LocalPort $cfg.cluster.decisionPort -RemoteAddress (Get-KitRemoteAddresses $cfg) -Action Allow | Out-Null
+        }
         Start-ScheduledTask -TaskName HomeRouter
-        Ok "HomeRouter started (workers: $($workerHosts -join ', '))"
+        Ok "HomeRouter started (workers: $($workerHosts -join ', ')$(if ($cfg.cluster.decisionPort) { "; decisions on port $($cfg.cluster.decisionPort)" }))"
+    }
+    # Strata tier (README > Strata tier): the server runs as YOU (Strata lives in your profile), started/stopped by
+    # homellm.ps1 through this task. Needs you logged on; without a session the tier is skipped.
+    if (@($cfg.llm.tiers | Where-Object { $_.external }).Count -and $cfg.strata.runConfig) {
+        $task = @($cfg.llm.tiers | Where-Object { $_.external } | Select-Object -First 1)[0].external.task
+        if (-not $task) { $task = 'HomeLLM Strata' }
+        $action = New-ScheduledTaskAction -Execute 'conhost.exe' `
+            -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $paths.Scripts 'strata-serve.ps1')`""
+        $userPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        $userSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $task -Action $action -Principal $userPrincipal -Settings $userSettings -Force | Out-Null
+        Ok "'$task' registered for $env:USERNAME (started by the supervisor for the external tier)"
+    }
+    # Model gateway (README > Model gateway): one API-key endpoint for every model and mode
+    if ($cfg.gateway.enabled) {
+        $keyFile = Join-Path $paths.Root $(if ($cfg.gateway.keyFile) { $cfg.gateway.keyFile } else { 'gateway-key.txt' })
+        if (-not (Test-Path $keyFile)) {
+            $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+            Set-Content -Path $keyFile -Value ('hg-' + [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')) -NoNewline
+            Ok "gateway API key created: $keyFile"
+        }
+        $sttPy = Join-Path $paths.Voice 'stt\Scripts\python.exe'
+        Stop-ScheduledTask -TaskName 'HomeLLM Gateway' -ErrorAction SilentlyContinue
+        $action = New-ScheduledTaskAction -Execute $sttPy -WorkingDirectory $paths.Scripts -Argument "-I `"$(Join-Path $paths.Scripts 'gateway.py')`""
+        Register-ScheduledTask -TaskName 'HomeLLM Gateway' -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+            -Settings $settings -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'HomeLLM Gateway'
+        Ok "HomeLLM Gateway started on 127.0.0.1:$(if ($cfg.gateway.port) { $cfg.gateway.port } else { 8090 }) ($(@($cfg.gateway.models).Count) models)"
     }
 }
 

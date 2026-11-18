@@ -57,7 +57,13 @@
         "name": "none",
         "whisper": false
       }
-    ]
+    ],
+    "_jevTier": "A worker that mostly answers Jev decisions (README > Jev decisions on a worker) can put a tier like this first. Measured on an RTX 3080 10 GB next to Whisper: 41/41 on the eval at 0.19 s, ~9.4 GB. model.estMiB plans with the measured footprint (the file-size guess is too high for a 10 GB card).",
+    "_exampleJevTier": {
+      "name": "gemma", "maxOthersMiB": 896, "whisper": true,
+      "model": { "repo": "unsloth/gemma-4-12b-it-GGUF", "file": "gemma-4-12b-it-UD-Q4_K_XL.gguf", "ctx": 4096,
+        "decisionSeqs": 24, "estMiB": 8200, "chatTemplateKwargs": { "enable_thinking": false } }
+    }
   },
   "vram": {
     "upgradeMarginMiB": 512,

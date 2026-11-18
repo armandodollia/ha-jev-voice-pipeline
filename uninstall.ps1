@@ -12,7 +12,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { throw 'Run this from an elevated PowerShell (Run as administrator).' }
 
-foreach ($name in 'HomeLLM', 'HomeVoice', 'HomeRouter') {
+foreach ($name in @('HomeLLM', 'HomeVoice', 'HomeRouter', 'HomeLLM Gateway') + @($cfg.llm.tiers | Where-Object { $_.external } | ForEach-Object { $_.external.task })) {
     if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $name -Confirm:$false
@@ -27,7 +27,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 Write-Host 'stopped servers'
 
 Get-NetFirewallRule -DisplayName 'HomeLLM llama-server', 'HomeLLM llama-server program', 'HomeVoice Wyoming', 'HomeVoice Python',
-    'HomeRouter control', 'HomeLLM worker*' -ErrorAction SilentlyContinue |
+    'HomeRouter control', 'HomeRouter decision', 'HomeLLM worker*' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
 Write-Host 'removed firewall rules'
 

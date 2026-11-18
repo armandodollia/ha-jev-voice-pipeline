@@ -23,6 +23,8 @@ from .const import (
     ACTIONS,
     BRIGHTNESS_STEPS,
     COLORS,
+    CONF_TEMPERATURE_STEP,
+    DEFAULT_TEMPERATURE_STEP,
     DEFAULT_STEP,
     CONF_ACTION_THRESHOLD,
     CONF_DECISION_URL,
@@ -40,6 +42,7 @@ from .const import (
     EXCLUDED_COVER_CLASSES,
     KINDS,
     SCOPES,
+    KELVIN_STEP_SCALE,
     KELVIN_STEPS,
     KELVIN_WORDS,
     LIGHT_ACTIONS,
@@ -55,24 +58,27 @@ INSTRUCTIONS = (
     "or white temperature of exactly one light from the list, pick that action and device, and the value they asked "
     "for. Brightness is a percentage. Use brighten or dim for relative changes (brighter, dimmer, turn it up/down) "
     "and give the amount if the user said one (a little, a lot, or percentage points). "
-    "White temperature is warm, soft, neutral, cool, daylight or a number of Kelvin. "
+    "White temperature is warm, soft, neutral, cool, daylight or a number of Kelvin; use warmer or cooler for "
+    "relative changes (warmer, cooler, more yellow, more blue), with a_little or a_lot as the step if said. "
     "Scope: one_device when the user names a device or a group from the list, even if its name contains a room "
     "('close the TV room shades' when TV Room Shades is a group means that group, controlled as one); "
     "this_room for a kind of device without a room or device name ('close the shades', 'turn off the lights'); "
     "named_room for every individual device of a kind in a room the user names, when no group has that name or the "
     "user says each, every, all, both or individually ('close each of the TV room shades', 'all the TV room shades'); "
     "whole_house for all of a kind everywhere ('close all the shades', 'every light in the house'). "
-    "If it is a question, a chat, a warmer/cooler change, or a device that is not in the list, "
+    "If it is a question, a chat, or a device that is not in the list, "
     "answer action 'other' and device 'none'. "
     "Answer 'none' for values the user did not ask for."
 )
 VERB = {"turn_on": "Turned on", "turn_off": "Turned off", "open": "Opened", "close": "Closed",
         "lock": "Locked", "unlock": "Unlocked",
-        "set_brightness": "Set", "brighten": "Brightened", "dim": "Dimmed", "set_color": "Set", "set_temperature": "Set"}
+        "set_brightness": "Set", "brighten": "Brightened", "dim": "Dimmed", "set_color": "Set", "set_temperature": "Set",
+        "warmer": "Warmed", "cooler": "Cooled"}
 DONE = {"turn_on": "Turned on {}.", "turn_off": "Turned off {}.", "open": "Opening {}.", "close": "Closing {}.",
         "lock": "Locking {}.", "unlock": "Unlocking {}.",
         "set_brightness": "Set {} to {}%.",
-        "brighten": "Brightened {} to {}%.", "dim": "Dimmed {} to {}%.", "set_color": "Set {} to {}.", "set_temperature": "Set {} to {} K."}
+        "brighten": "Brightened {} to {}%.", "dim": "Dimmed {} to {}%.", "set_color": "Set {} to {}.", "set_temperature": "Set {} to {} K.",
+        "warmer": "Made {} warmer ({} K).", "cooler": "Made {} cooler ({} K)."}
 _ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
          "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
          "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
@@ -186,6 +192,29 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             parts.append(f"{name} ({', '.join(member_names)})")
         return (" Groups (one name that controls several devices together): " + "; ".join(parts) + ".") if parts else ""
 
+    @staticmethod
+    def _canonical(devices: dict[str, str]) -> dict[str, str]:
+        """One spoken name per entity (its first name) for the device choices; aliases go into _alias_note instead,
+        so the model's confidence isn't split across names of the same device (a car lock with two aliases
+        scored 0.72 on 'lock the car', under the 0.9 lock threshold)."""
+        first: dict[str, str] = {}
+        for name, eid in devices.items():
+            first.setdefault(eid, name)
+        return {name: eid for eid, name in first.items()}
+
+    @staticmethod
+    def _alias_note(devices: dict[str, str]) -> str:
+        """' Other names: Car = Driveway Car Lock; ...' (stable between requests, so the prompt stays cached)."""
+        first: dict[str, str] = {}
+        others: dict[str, list[str]] = {}
+        for name, eid in devices.items():
+            if eid not in first:
+                first[eid] = name
+            else:
+                others.setdefault(eid, []).append(name)
+        parts = [f"{', '.join(names)} = {first[eid]}" for eid, names in sorted(others.items(), key=lambda x: first[x[0]])]
+        return (" Other names for devices (answer with the device's main name): " + "; ".join(parts) + ".") if parts else ""
+
     def _is_secure(self, eid: str) -> bool:
         """Locks and garage/gate/door covers: stricter threshold, open/close or lock/unlock only, single device only."""
         domain = eid.split(".")[0]
@@ -226,12 +255,12 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
     async def _decide(self, text: str, devices: dict[str, str], rooms: list[str]) -> dict | None:
         payload = {
             "model": "home",
-            "instructions": INSTRUCTIONS + self._group_note(devices),
+            "instructions": INSTRUCTIONS + self._group_note(devices) + self._alias_note(devices),
             "schema": {
                 "action": {"type": "enum",
                            "choices": ["turn_on", "turn_off", "open", "close", "lock", "unlock", *LIGHT_ACTIONS, "other"],
                            "description": "What does the user want done?"},
-                "device": {"type": "enum", "choices": [*devices.keys(), "none"],
+                "device": {"type": "enum", "choices": [*self._canonical(devices).keys(), "none"],
                            "description": "Which single device from the list is the user talking about?"},
                 "scope": {"type": "enum", "choices": SCOPES,
                           "description": "One named device, this room, a room the user names, or the whole house?"},
@@ -242,8 +271,8 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
                 "brightness": {"type": "enum", "choices": [*(f"{n}%" for n in BRIGHTNESS_STEPS), "none"],
                                "description": "Brightness percentage the user asked to set (not a relative change)"},
                 "step": {"type": "enum", "choices": [*STEP_WORDS, *(f"{a}%" for a in STEP_AMOUNTS), "none"],
-                         "description": "How much brighter or dimmer (a_little, a_lot, or percentage points); "
-                                        "none if the user didn't say"},
+                         "description": "How much brighter, dimmer, warmer or cooler (a_little, a_lot, or brightness "
+                                        "percentage points); none if the user didn't say"},
                 "color": {"type": "enum", "choices": [*COLORS, "none"],
                           "description": "Colour the user asked for"},
                 "temperature": {"type": "enum", "choices": [*KELVIN_WORDS, *KELVIN_STEPS, "none"],
@@ -291,6 +320,18 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
             # dimming stops at 1% (never off); brightening an off light turns it on at the step
             pct = min(100, current + step) if action == "brighten" else max(1, current - step)
             return "light", "turn_on", {"brightness_pct": pct}, str(pct)
+        if action in ("warmer", "cooler"):
+            if "color_temp" not in modes:
+                return None
+            lo = state.attributes.get("min_color_temp_kelvin") or 2000
+            hi = state.attributes.get("max_color_temp_kelvin") or 6500
+            now = state.attributes.get("color_temp_kelvin") if state.state == "on" else None
+            now = now or (lo + hi) // 2
+            step_word = result["decision"].get("step")
+            shift = round(int(self._opt(CONF_TEMPERATURE_STEP, DEFAULT_TEMPERATURE_STEP))
+                          * KELVIN_STEP_SCALE.get(step_word, 1.0))
+            kelvin = max(lo, min(hi, now - shift if action == "warmer" else now + shift))
+            return "light", "turn_on", {"color_temp_kelvin": kelvin}, str(kelvin)
         field = {"set_brightness": "brightness", "set_color": "color", "set_temperature": "temperature"}[action]
         value = result["decision"].get(field)
         if action == "set_brightness":
@@ -380,7 +421,7 @@ class HomeLlmAssistAgent(conversation.ConversationEntity, conversation.AbstractC
         count = f"{n} {kind}" if n > 1 else f"1 {singular}"
         shown = targets[0][1][3]
         tail = {"set_brightness": f" to {shown}%", "set_color": f" to {shown}",
-                "set_temperature": f" to {shown} K"}.get(action, "")
+                "set_temperature": f" to {shown} K", "warmer": f" to {shown} K", "cooler": f" to {shown} K"}.get(action, "")
         response.async_set_speech(f"{VERB[action]} {count} {where}{tail}.")
         return conversation.ConversationResult(response=response, conversation_id=user_input.conversation_id)
 

@@ -26,7 +26,7 @@ ACTIONS = {
     "unlock": {"lock": "unlock"},
 }
 # light settings (action -> light.turn_on with brightness_pct / color_name / color_temp_kelvin)
-LIGHT_ACTIONS = ("set_brightness", "brighten", "dim", "set_color", "set_temperature")
+LIGHT_ACTIONS = ("set_brightness", "brighten", "dim", "set_color", "set_temperature", "warmer", "cooler")
 # brightness the user can name: every 1% up to 20 (night-light levels), then steps of 5
 BRIGHTNESS_STEPS = [*range(0, 21), *range(25, 101, 5)]
 # relative brightness change in percentage points; words map to amounts, no amount means DEFAULT_STEP
@@ -36,6 +36,11 @@ DEFAULT_STEP = 20
 COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "magenta", "pink", "white"]
 # spoken white temperatures; words map to Kelvin, numbers are Kelvin
 KELVIN_WORDS = {"warm": 2700, "soft": 2700, "neutral": 4000, "cool": 5000, "daylight": 6500}
+# relative white-temperature change ("warmer" = fewer Kelvin): the configured step (options flow), scaled by the
+# spoken step word; no word means the step itself
+CONF_TEMPERATURE_STEP = "temperature_step"
+DEFAULT_TEMPERATURE_STEP = 500
+KELVIN_STEP_SCALE = {"a_little": 0.6, "a_lot": 2.0}
 KELVIN_STEPS = ["2000", "2200", "2500", "2700", "3000", "3500", "4000", "4500", "5000", "5500", "6000", "6500"]
 CONF_VALUE_THRESHOLD = "value_threshold"
 DEFAULT_VALUE_THRESHOLD = 0.5

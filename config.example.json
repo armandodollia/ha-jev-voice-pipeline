@@ -27,7 +27,20 @@
           "ctx": 16384, "decisionSeqs": 12, "chatTemplateKwargs": { "enable_thinking": false } } },
       { "name": "voice", "maxOthersMiB": 19456, "whisper": true },
       { "name": "none",  "whisper": false }
-    ]
+    ],
+    "_tierOptions": "Optional per tier: upgradeMarginMiB; upgradeDelaySec (idle seconds before upgrading INTO this tier); remoteStt / remoteDecision (allowed only while a worker's Whisper / Jev decisions are healthy, via router.py); model.estMiB (VRAM footprint to plan with); external (a server started by a scheduled task, e.g. Strata: README > Strata tier). The example below goes first in tiers to use it.",
+    "_exampleStrataTier":
+      { "name": "strata", "maxOthersMiB": 2304, "whisper": false, "remoteStt": true, "remoteDecision": true,
+        "upgradeMarginMiB": 768, "upgradeDelaySec": 300,
+        "external": { "task": "HomeLLM Strata", "label": "Strata: Swift 1.5 Flash-Next IQ3_XXS",
+          "processMatch": "strata-serve\\.ps1", "pathPrefix": "C:\\Users\\you\\AppData\\Local\\Strata\\",
+          "estMiB": 21000, "blockMinutes": 15 } }
+  },
+
+  "strata": {
+    "_comment": "README > Strata tier. runConfig: the strata-<model>.json that `strata install --setup --no-start` wrote (environment variables are expanded); strataCmd: optional path of strata.cmd",
+    "runConfig": "%LOCALAPPDATA%\\Strata\\install\\strata-swift-iq3_xxs.json",
+    "strataCmd": ""
   },
 
   "vram": {
@@ -63,7 +76,9 @@
       "_comment": "HTTPS ports published inside the tailnet only (0 = don't publish).",
       "speechApi": 443,
       "haRelay": 8443,
-      "llm": 0
+      "llm": 0,
+      "gateway": 0,
+      "_gateway": "the model gateway (if gateway.enabled), e.g. 8446"
     },
     "advertiseLanRoute": false
   },
@@ -77,8 +92,32 @@
     "_workers": "mac (optional): the orchestrator wakes the worker with Wake-on-LAN while it needs it and the worker hasn't checked in for 20 s",
     "requestAfterSec": 15,
     "releaseAfterSec": 60,
+    "preferWorkers": [],
+    "_preferWorkers": "kinds (\"stt\", \"tts\") that always go to a healthy worker first, freeing this GPU for a bigger LLM tier (README > Bigger model with a worker doing speech); \"tts\" also needs localPorts.tts",
+    "decisionPort": 0,
+    "_decisionPort": "orchestrator: a second public LLM port for Jev /v1/decision (e.g. 8082). Add \"decision\" to preferWorkers to answer decisions on a worker's model first (README > Jev decisions on a worker); point homellm_assist's decision URL at this port",
     "name": "",
     "orchestrator": ""
+  },
+
+  "gateway": {
+    "_comment": "README > Model gateway. One OpenAI-compatible endpoint with an API key (keyFile, created by install.ps1) for every model and mode below; publish it with tailscale.serve.gateway.",
+    "enabled": false,
+    "port": 8090,
+    "keyFile": "gateway-key.txt",
+    "decisionUrl": "",
+    "_decisionUrl": "where Jev decisions go; empty = the router's decision port (cluster.decisionPort), else llm.port",
+    "rewarm": { "enabled": true, "delaySec": 1.5, "rebuildEverySec": 900,
+      "_comment": "after other callers' decisions, re-send Home Assistant's decision payload (scripts\\ha_payload.py) so its prompt stays cached" },
+    "models": [
+      { "id": "strata-swift-none",   "name": "Swift 1.5 125B (Strata) - no thinking",          "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "none",   "requireTier": "strata", "ctx": 131072 },
+      { "id": "strata-swift-low",    "name": "Swift 1.5 125B (Strata) - thinking low (4K cap)", "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "low", "reasoningBudget": 4096, "requireTier": "strata", "ctx": 131072 },
+      { "id": "strata-swift-medium", "name": "Swift 1.5 125B (Strata) - thinking medium",      "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "medium", "requireTier": "strata", "ctx": 131072 },
+      { "id": "strata-swift-high",   "name": "Swift 1.5 125B (Strata) - thinking high",        "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "high",   "requireTier": "strata", "ctx": 131072 },
+      { "id": "gemma-worker",        "name": "Gemma 4 12B (worker) - chat only",                "kind": "chat", "url": "http://192.168.1.50:8080", "think": false, "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
+      { "id": "gemma-worker-think",  "name": "Gemma 4 12B (worker) - chat only, thinking",      "kind": "chat", "url": "http://192.168.1.50:8080", "think": true,  "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
+      { "id": "jev-decision",        "name": "Jev decision - fixed-choice answers",             "kind": "jev", "ctx": 4096 }
+    ]
   },
 
   "apollo": {
