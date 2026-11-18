@@ -31,7 +31,12 @@ function ConvertTo-NativeJsonArg($obj) {
 function Write-KitLog($file, $msg) {
     $paths = Get-KitPaths
     New-Item -ItemType Directory -Force $paths.Logs | Out-Null
-    Add-Content -Path (Join-Path $paths.Logs $file) -Value ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $msg)
+    $line = '{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $msg
+    # never fatal: a reader holding the file open (e.g. `tail -f`) made Add-Content throw inside the supervisor's catch
+    # block and the supervisor exit; retry briefly, then drop the line
+    for ($i = 0; $i -lt 5; $i++) {
+        try { [IO.File]::AppendAllText((Join-Path $paths.Logs $file), "$line`r`n"); return } catch { Start-Sleep -Milliseconds 200 }
+    }
 }
 
 # Remote addresses allowed through the firewall: the local subnet, plus the Tailscale ranges if enabled.
@@ -59,6 +64,8 @@ function Get-KitServeMap($cfg) {
     if ($cfg.tailscale.serve.speechApi) { $m += [pscustomobject]@{ Name = 'Speech API';   Https = $cfg.tailscale.serve.speechApi; Local = $cfg.voice.ports.speechApi; Voice = $true } }
     if ($cfg.tailscale.serve.haRelay)   { $m += [pscustomobject]@{ Name = 'Assist relay'; Https = $cfg.tailscale.serve.haRelay;   Local = $cfg.voice.ports.haRelay;   Voice = $true } }
     if ($cfg.tailscale.serve.llm)       { $m += [pscustomobject]@{ Name = 'LLM API';      Https = $cfg.tailscale.serve.llm;       Local = $cfg.llm.port;              Voice = $false } }
+    if ($cfg.tailscale.serve.gateway -and $cfg.gateway.enabled) {
+        $m += [pscustomobject]@{ Name = 'Model gateway'; Https = $cfg.tailscale.serve.gateway; Local = $(if ($cfg.gateway.port) { $cfg.gateway.port } else { 8090 }); Voice = $false } }
     $m
 }
 

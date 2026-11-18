@@ -1,7 +1,9 @@
 """Model router for a multi-PC setup: the orchestrator PC keeps the public ports (LLM 8080, Wyoming STT 10300) and
 forwards each connection to its own llama-server/Whisper/Piper or to a worker PC's. Clients (Home Assistant, the
 speech API, phone apps) keep using the orchestrator's address and never see the switch. Kinds: llm, stt (Wyoming
-Whisper) and, when configured, tts (Wyoming Piper).
+Whisper) and, when configured, tts (Wyoming Piper) and decision (a second LLM port for Jev-mode /v1/decision, so
+decisions can prefer a worker's model while chat stays on the orchestrator's bigger one; it uses the same llama-server
+backends as llm unless "local"/worker "decision" addresses are given).
 
 Routing, per new connection (TCP level, so streaming, Jev-mode /v1/decision and Wyoming all pass through untouched):
   - while a game/stream runs on the orchestrator (status.json activity) and a worker is healthy -> the worker,
@@ -47,15 +49,25 @@ if "listen" not in CFG:
         "logFile": str(root / "logs" / "router.log"),
         "requestAfterSec": cl.get("requestAfterSec", 15), "releaseAfterSec": cl.get("releaseAfterSec", 60),
         "preferWorkers": cl.get("preferWorkers", []),
+        **({"decisionPort": cl["decisionPort"]} if cl.get("decisionPort") else {}),
         "waitForBackendSec": cl.get("waitForBackendSec", 30),
     }
+if CFG.get("decisionPort"):
+    CFG["listen"]["decision"] = CFG["decisionPort"]
+if "decision" in CFG["listen"]:
+    CFG["local"].setdefault("decision", CFG["local"]["llm"])
+    for w in CFG.get("workers", []):
+        if w.get("llm"):
+            w.setdefault("decision", w["llm"])
 LOG = Path(CFG["logFile"])
 STATUS_FILE = Path(CFG["statusFile"])
 STATE_FILE = Path(CFG["stateFile"])
 REQUEST_AFTER = CFG.get("requestAfterSec", 15)
 RELEASE_AFTER = CFG.get("releaseAfterSec", 60)
 WAIT_FOR_BACKEND = CFG.get("waitForBackendSec", 30)   # hold a new connection this long while no backend is up
-KINDS = ("llm", "stt") + (("tts",) if "tts" in CFG["listen"] and "tts" in CFG["local"] else ())
+KINDS = (("llm", "stt") + (("tts",) if "tts" in CFG["listen"] and "tts" in CFG["local"] else ())
+         + (("decision",) if "decision" in CFG["listen"] else ()))
+LLM_KINDS = ("llm", "decision")             # llama-server backends (HTTP /health); the rest speak Wyoming
 PREFER = set(CFG.get("preferWorkers", [])) & set(KINDS)   # kinds that go to a healthy worker first
 
 
@@ -104,7 +116,7 @@ def wake_workers():
     """While workers are wanted, wake any that hasn't polled in 20 s (asleep or off): Wake-on-LAN, resent every
     minute, up to WOL_MAX times until it shows up again."""
     now = time.monotonic()
-    wanted = NEEDED["llm"] or NEEDED["stt"]
+    wanted = NEEDED["llm"] or NEEDED["stt"] or NEEDED.get("decision", False)
     for name, mac in WOL.items():
         seen = WORKER_SEEN.get(name, (-1e9, None))[0]
         if not wanted or now - seen < 20:
@@ -155,7 +167,7 @@ async def check_stt(b):
 
 async def probe(b):
     try:
-        ok = await (check_llm(b) if b.kind == "llm" else check_stt(b))   # stt and tts both speak Wyoming
+        ok = await (check_llm(b) if b.kind in LLM_KINDS else check_stt(b))   # stt and tts both speak Wyoming
     except Exception:
         ok = False
     if ok != b.healthy:
@@ -176,7 +188,7 @@ def order(kind):
     up = [w for w in workers if w.healthy]
     # workers first while a game/stream runs, and while the local supervisor is about to swap its model (and a bit
     # after), so nobody hits the local server mid-swap
-    swapping = kind == "llm" and time.monotonic() - pending_seen < SWAP_GRACE
+    swapping = kind in LLM_KINDS and time.monotonic() - pending_seen < SWAP_GRACE
     if (activity != "idle" or swapping or kind in PREFER) and up:
         return up + [local] + [w for w in workers if not w.healthy]
     return sorted(BACKENDS[kind], key=lambda b: not b.healthy)   # stable: local first among equals
@@ -189,7 +201,7 @@ def update_wanted(kind):
     busy = activity != "idle"
     if busy or (not local.healthy and now - local.changed >= REQUEST_AFTER):
         want = True
-    elif local.healthy and now - local.changed >= RELEASE_AFTER and not (kind == "llm" and pending):
+    elif local.healthy and now - local.changed >= RELEASE_AFTER and not (kind in LLM_KINDS and pending):
         # (an upgrade still pending means the local model is about to be swapped: keep the worker through it)
         want = False
     else:
@@ -291,7 +303,7 @@ async def control(cr, cw):
         if url.path == "/assignment":
             if "worker" in q:
                 WORKER_SEEN[q.pop("worker")] = (time.monotonic(), q)
-            body, code = {"llm": WANTED["llm"], "whisper": WANTED["stt"], "activity": activity}, "200 OK"
+            body, code = {"llm": WANTED["llm"] or WANTED.get("decision", False), "whisper": WANTED["stt"], "activity": activity}, "200 OK"
         elif url.path == "/status":
             body, code = json.loads(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else {}, "200 OK"
         else:

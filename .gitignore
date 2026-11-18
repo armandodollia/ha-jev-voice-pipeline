@@ -10,3 +10,8 @@ voice/
 state/
 logs/
 __pycache__/
+
+# Per-machine eval cases and results, gateway key
+eval/cases.json
+eval/results_*.json
+gateway-key.txt

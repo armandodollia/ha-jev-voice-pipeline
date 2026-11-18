@@ -248,8 +248,11 @@ example automation.
 ### 3.7 Decision-first Assist agent (optional): no hallucinated devices
 `homeassistant\custom_components\homellm_assist` is a conversation agent for your Assist pipeline. For every request
 it first asks the local model a Jev-mode decision with two fixed-choice questions:
-- **action:** turn_on, turn_off, open, close, set_brightness, brighten, dim, set_color, set_temperature or other
-- **device:** one of the devices exposed to Assist (names and aliases), or none
+- **action:** turn_on, turn_off, open, close, set_brightness, brighten, dim, set_color, set_temperature, warmer,
+  cooler or other
+- **device:** one of the devices exposed to Assist, or none. Each device is offered once, by its main name; its
+  aliases are listed in the instructions ("Other names: Car = Driveway Car Lock"), so the model's confidence isn't
+  split between names of the same device (that split once left "lock the car" at 0.72, under the 0.9 lock threshold)
 - **values:** colour (red, orange, yellow, green, cyan, blue, purple, magenta, pink, white), white temperature
   (warm/soft 2700 K, neutral 4000, cool 5000, daylight 6500, or 2000–6500 K), and brightness
 
@@ -272,7 +275,10 @@ The model can only answer with those values, so it can't invent a device. The ag
 - they fit together: lights, switches, fans and scripts turn on/off; covers open/close;
 - the light supports the setting (brightness, colour, or colour temperature, clamped to the light's range).
 
-Everything else goes unchanged to a fallback agent (your LLM agent): questions, relative colour-temperature changes ("a bit warmer"), several devices, unknown devices and low-confidence answers.
+**Warmer / cooler:** "make the office lights warmer" lowers the colour temperature by the configured step (Configure
+→ warmer/cooler step, default 500 K); "a little" is 0.6× the step, "a lot" 2×, clamped to the light's range.
+
+Everything else goes unchanged to a fallback agent (your LLM agent): questions, several devices, unknown devices and low-confidence answers.
 
 **Doors and locks** (locks, garage/gate/door covers):
 - **Allowed actions:** open/close or lock/unlock, one device at a time.
@@ -306,7 +312,8 @@ Everything else goes unchanged to a fallback agent (your LLM agent): questions, 
 Setup:
 1. Copy the folder to `/config/custom_components/` and restart Home Assistant.
 2. Add **Home LLM Assist** under Settings → Devices & services. Set the decision URL
-   (`http://<pc>:8080/v1/decision`) and the fallback agent.
+   (`http://<pc>:8080/v1/decision`, or the router's decision port, see *Jev decisions on a worker*) and the fallback
+   agent.
 3. Set it as the conversation agent of your Assist pipeline.
 
 Decisions are logged at INFO level under `custom_components.homellm_assist`.
@@ -509,6 +516,88 @@ Example worker tiers for a 10 GB card: `small` (Qwen3.5 4B + Whisper) while othe
 3. On the worker, run `scripts\install-worker.ps1` as administrator. It creates the Whisper venv, allows the LLM and
    Whisper ports from the orchestrator only, and registers `HomeLLM` and `HomeVoice`.
 
+### Jev decisions on a worker
+
+Decisions don't need a big model: on our 41-command test a Gemma 4 12B on an RTX 3080 scored 41/41, the same as the
+27B. Giving decisions their own router port lets them prefer the worker while chat stays on the main GPU, and frees
+the main GPU for a model that has no `/v1/decision` at all (Strata, below).
+
+- **Orchestrator:** `cluster.decisionPort` (e.g. 8082) opens a second public LLM port for decisions; add
+  `"decision"` to `cluster.preferWorkers`. Decisions then go to a healthy worker first and to the local server
+  otherwise; workers are kept asked to load their model. Re-run `install.ps1` (it opens the port to the LAN and
+  tailnet). Point `homellm_assist`'s decision URL at `http://<pc>:<decisionPort>/v1/decision`.
+- **Main GPU tiers** with `"remoteDecision": true` are allowed only while a worker answers decisions; if it's gone for
+  8 s the supervisor drops to the next tier.
+- **Worker tier tuned for decisions** (`config.worker.example.json`, `_exampleJevTier`): Gemma 4 12B UD-Q4_K_XL,
+  4K context, q8_0 KV, 24 decision sequences, `estMiB` 8200. Measured on the 3080 next to Whisper: 41/41, 0.19 s per
+  decision, ~9.4 GB. A/B notes: 24 sequences were faster than 12 (0.23 s) and as fast as 32; Google's QAT Q4_0 also
+  scored 41/41 but with lower confidence on the right answers (min 0.93 vs 0.97); q8_0 KV at 8K overflowed into shared
+  memory and doubled latency. Chat on such a tier is limited to short prompts.
+- **Prompt cache:** a cached Home Assistant decision takes ~0.2 s, an uncached one 0.6–0.9 s. Other callers'
+  decisions with different instructions evict the cache; the model gateway re-warms it (below).
+
+### Strata tier (125B MoE, idle only)
+
+[Strata](https://github.com/Niko1221/Strata) runs Qwen3.8-Flash-Next (125B MoE) or its Swift 1.5 fine-tune on one
+24 GB card plus ~45 GB of RAM. Measured on an RTX 4090 + 64 GB (Swift 1.5 IQ3_XXS, 128K context, int8 KV, GPU image
+reader): load 23 s, 23.7 GB VRAM, 115–140 tok/s generation from 7K to 109K tokens of context, prompt reading 2.8K–5.4K
+tok/s. It has no `/v1/decision`, so use it with *Jev decisions on a worker*.
+
+1. Install the Strata Terminal and the model as yourself, without starting it:
+   `strata install --family swift --model IQ3_XXS --context 131072 --vision gpu --port 8081 --no-browser --yes --setup --no-start`,
+   then `strata update` once (it downloads the engine and test-starts it; free the GPU first). Add
+   `"reasoning_effort": "none"` and `"aliases": ["home"]` to the generated `strata-<model>.json` so callers that don't
+   ask for thinking (Home Assistant, mail) answer at once.
+2. In `config.json`: `strata.runConfig` = that file, and put a tier like `llm._exampleStrataTier` first in
+   `llm.tiers` (set `external.pathPrefix` to your Strata folder; it's matched against process paths). Its
+   `upgradeDelaySec` 300 loads it only after 5 idle minutes, because loading pins RAM and can stall the PC briefly.
+3. Re-run `install.ps1`. It registers the `HomeLLM Strata` task for your user (Strata lives in your profile); the
+   supervisor starts and stops it. Strata needs you logged on: without a session, or if it crashes, the tier is
+   skipped for `external.blockMinutes` and the next tier loads.
+
+A game start unloads it within seconds (tested: 23.7 → 0.95 GB in 6 s), and chat falls back to the worker through the
+router. Thinking: Strata defaults to `high`; per request `reasoning_effort` none/low/medium/high. Community 4090 reports
+and our tests suggest `low` (optionally with `reasoning_budget_tokens` 4096) for agent work and `none` for voice.
+
+## Model gateway (one key for every model and mode)
+
+`scripts\gateway.py` (task `HomeLLM Gateway`, `gateway.enabled`) is one OpenAI-compatible endpoint for coding agents
+(OpenCode, T3 Code), Hermes and other machines. Each entry in `gateway.models` is a selectable model id that pins a
+backend and a mode:
+
+| Field | Meaning |
+|---|---|
+| `url`, `kind` | backend (`chat`), or `jev`: the last user message becomes a decision (choices from `options: a \| b \| c`, a `[a\|b]` bracket or `- a` bullets, else yes/no; a pasted JSON decision body is sent as is) |
+| `effort` / `think` | thinking forced per model: `reasoning_effort` none/low/medium/high (Strata/Qwen) or `enable_thinking` (Gemma) |
+| `reasoningBudget` | hard cap on thinking tokens (Strata) |
+| `chatOnly`, `promptBudget`, `maxReply` | for small-context models: drop tools, replace a long agent system prompt, trim old turns |
+| `requireTier`, `requireModel` | answer 503 with a clear message unless that tier (`state\status.json`) or model (`/props`) is loaded |
+
+- **Key:** every request needs `Authorization: Bearer <key>`; `install.ps1` writes the key to `gateway.keyFile`.
+  Publish it tailnet-only with `tailscale.serve.gateway` (e.g. 8446). Copy the key to other machines out of band (we
+  used Taildrop), never in a chat or a prompt.
+- **`POST /v1/decision`** passes any decision through to `gateway.decisionUrl` (default: the router's decision port).
+- **Re-warm:** after a decision from anyone but Home Assistant, the gateway re-sends Home Assistant's exact payload
+  (`scripts\ha_payload.py` rebuilds it from live HA every 15 min) so the next voice command is a cache hit. Measured:
+  a voice command right after an unrelated decision took 1.0 s without it, 0.3 s with it. Your own decisions are
+  unaffected, apart from occupying the decision GPU for ~0.7 s afterwards.
+- **OpenCode** (works as a T3 Code provider): a provider with `"npm": "@ai-sdk/openai-compatible"`,
+  `"baseURL": "https://<pc>.<tailnet>.ts.net:8446/v1"`, `"apiKey": "{file:~/.config/opencode/home-gateway.key}"`
+  and one model entry per gateway model (`tool_call` false for chat-only and jev models, `limit.context` = `ctx`).
+
+## Measuring decision accuracy (eval)
+
+```
+voice\stt\Scripts\python.exe scripts\ha_payload.py
+voice\stt\Scripts\python.exe eval\run_eval.py http://<server>:<port> <label> [eval\cases.json]
+```
+
+`ha_payload.py` rebuilds the exact payload `homellm_assist` sends (needs an admin token in `homeAssistant.tokenFile`
+to read the registries). `run_eval.py` scores a llama-server on your commands the way the integration would act:
+aliases count as their device, a spoken percentage overrides the scored number, room/house commands need confident
+scope/kind/room, locks and garage doors need 0.9. Start `eval\cases.json` from `eval\cases.example.json` with your own
+device and room names; results go to `eval\results_<label>.json`.
+
 ## Activity detection
 
 Games and streams no longer pick the model (VRAM does). They're detected to hold back model loads while they run
@@ -542,9 +631,12 @@ commands are kept; a backup is written next to the config).
 | Wristotle "network failure" | Use the `https://….ts.net` URLs, check Tailscale is connected on the phone, turn off Private DNS. |
 | Wristotle "access token rejected" | Wrong token, or created by a different user. |
 | `tailscale serve` failed | Enable MagicDNS and HTTPS certificates in the Tailscale admin console, then re-run the installer. |
+| Supervisor stopped logging while you watched the log | Fixed: a reader holding `supervisor.log` open made a log write fail inside the error handler. Log writes now retry and never stop the supervisor. |
+| Strata tier never loads / "skipped for 15 min" | The `HomeLLM Strata` task couldn't start (you weren't logged on) or Strata exited; see `logs\strata-serve.log`. The tier also needs a worker's Whisper and decisions (`remoteStt`, `remoteDecision`). |
+| Gateway answers 503 "isn't loaded" | The model's `requireTier`/`requireModel` isn't loaded (PC gaming, worker off). Pick another model. |
 
 Logs (`logs\`): `supervisor.log` (tier switches, activity), `server-<tier>.err.log` (llama-server), `voice.log`,
-`whisper.err.log`, `piper.err.log`, `speechApi.err.log`, `haRelay.err.log`.
+`whisper.err.log`, `piper.err.log`, `speechApi.err.log`, `haRelay.err.log`, `gateway.log`, `strata-serve.log`.
 
 ## Layout
 
@@ -555,7 +647,11 @@ config.worker.example.json -> config.json on a worker PC (multi-PC)
 games.txt, ignore.txt      game detection lists
 scripts\homellm.ps1        VRAM tier supervisor (task HomeLLM)
 scripts\voice.ps1          voice supervisor (task HomeVoice)
-scripts\router.py          multi-PC router + Wake-on-LAN (task HomeRouter, orchestrator only)
+scripts\router.py          multi-PC router + Wake-on-LAN + decision port (task HomeRouter, orchestrator only)
+scripts\gateway.py         model gateway: every model/mode behind one API key (task HomeLLM Gateway)
+scripts\ha_payload.py      rebuilds homellm_assist's decision payload from live HA (gateway re-warm, eval)
+scripts\strata-serve.ps1   serves a Strata model for an external tier (task HomeLLM Strata, runs as you)
+eval\run_eval.py           decision accuracy/latency test; cases.example.json to start from
 scripts\install-worker.ps1 sets up a worker PC
 scripts\speech_api.py      OpenAI-style speech API (watch STT/TTS)
 scripts\ha_relay.py        Assist pipeline relay (watch commands)

@@ -1,0 +1,13 @@
+[
+ ["turn on the office lights", {"action": "turn_on", "device": "Office Lights", "scope": "one_device"}],
+ ["turn off the kitchen lights", {"action": "turn_off", "scope": "named_room", "kind": "lights", "room": "Kitchen"}],
+ ["turn off all the lights", {"action": "turn_off", "scope": "whole_house", "kind": "lights"}],
+ ["set the office lights to 40 percent", {"action": "set_brightness", "device": "Office Lights", "brightness": "40%"}],
+ ["dim the office lights a little", {"action": "dim", "device": "Office Lights", "step": "a_little"}],
+ ["make the office lights warmer", {"action": "warmer", "device": "Office Lights"}],
+ ["make the office lights a lot cooler", {"action": "cooler", "device": "Office Lights", "step": "a_lot"}],
+ ["make the office lights blue", {"action": "set_color", "device": "Office Lights", "color": "blue"}],
+ ["close the living room shades", {"action": "close", "device": "Living Room Shades"}],
+ ["lock the front door", {"action": "lock", "device": "Front Door Lock"}],
+ ["what's the weather tomorrow", {"action": "other", "device": "none"}]
+]

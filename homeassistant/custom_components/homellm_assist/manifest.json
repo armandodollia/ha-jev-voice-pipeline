@@ -1,9 +1,12 @@
 {
   "domain": "homellm_assist",
   "name": "Home LLM Assist (Jev decisions)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "config_flow": true,
-  "dependencies": ["conversation", "homeassistant"],
+  "dependencies": [
+    "conversation",
+    "homeassistant"
+  ],
   "documentation": "https://github.com/armandodollia/ha-jev-voice-pipeline",
   "codeowners": [],
   "iot_class": "local_polling",

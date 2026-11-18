@@ -12,12 +12,14 @@ from .const import (
     CONF_DEVICE_THRESHOLD,
     CONF_FALLBACK_AGENT,
     CONF_SECURITY_THRESHOLD,
+    CONF_TEMPERATURE_STEP,
     CONF_VALUE_THRESHOLD,
     DEFAULT_ACTION_THRESHOLD,
     DEFAULT_DECISION_URL,
     DEFAULT_DEVICE_THRESHOLD,
     DEFAULT_FALLBACK_AGENT,
     DEFAULT_SECURITY_THRESHOLD,
+    DEFAULT_TEMPERATURE_STEP,
     DEFAULT_VALUE_THRESHOLD,
     DOMAIN,
 )
@@ -36,6 +38,8 @@ def _schema(d: dict) -> vol.Schema:
             vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
         vol.Required(CONF_VALUE_THRESHOLD, default=d.get(CONF_VALUE_THRESHOLD, DEFAULT_VALUE_THRESHOLD)):
             vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+        vol.Required(CONF_TEMPERATURE_STEP, default=d.get(CONF_TEMPERATURE_STEP, DEFAULT_TEMPERATURE_STEP)):
+            vol.All(vol.Coerce(int), vol.Range(min=50, max=3000)),
     })
 
 
