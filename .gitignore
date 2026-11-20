@@ -17,3 +17,6 @@ eval/results_*.json
 gateway-key.txt
 gateway-keys/
 *.key
+
+# Keys of remote backends (gateway backendKeyFile)
+backend-keys/

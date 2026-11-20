@@ -50,9 +50,28 @@ with the memory free. While it runs, VRAM is checked every `llm.activityPollSec`
 
 | Machine | Runs | Used by |
 |---|---|---|
-| Main PC: RTX 4090 24 GB, 64 GB RAM | Swift 1.5 Flash-Next 125B MoE at 256K context while idle ([Big MoE tier](#big-moe-tier-strata-default-or-basalt-opt-in)); the 4B fallback and local Whisper while gaming | coding agents (OpenCode / T3 Code), Hermes, Assist questions |
+| Main PC: RTX 4090 24 GB, 64 GB RAM | Swift 1.5 Flash-Next 125B MoE at 256K context while idle ([Big MoE tier](#big-moe-tier-strata-basalt-or-hotrod)); the 4B fallback and local Whisper while gaming | coding agents (OpenCode / T3 Code), Hermes, Assist questions |
 | Worker PC: RTX 3080 10 GB | Gemma 4 12B with Jev decisions, Whisper and Piper ([Multiple PCs](#multiple-pcs-worker-takes-over-while-you-game)) | Assist's fast path, voice, small chats while the 4090 games |
 | Model gateway on the main PC | one API key per machine, holds requests while the 4090 games ([Model gateway](#model-gateway-one-key-for-every-model-and-mode)) | laptops, Hermes, OpenCode ([Client templates](#client-templates-opencode-hermes-t3-code)) |
+
+## Choose an engine
+
+The big model (Swift 1.5 / Qwen3.8-Flash-Next, a 125B mixture-of-experts model, or a model of that class) needs an engine
+that keeps the experts outside VRAM. The kit supports four. Pick by GPU generation and RAM, then follow that engine's page.
+
+| Your GPU | RAM | Engine | Decode speed | Max context | OS | Kit support |
+|---|---|---|---|---|---|---|
+| **RTX 50 / Blackwell** (sm_120) | enough for the experts (≈ 64 GB with a 16 GB card for IQ3_S) | [**Basalt**](docs/engines/basalt.md) | IQ3_S 137–187 tok/s on an RTX 5060 Ti / 5080 16 GB, ~375 on an RTX 5090 (*their hardware*, Basalt community runs) | 262K | Windows, Linux (Basalt tests on Linux) | `strata.engine` `basalt`, **untested** (no Blackwell card here) |
+| **RTX 40** (sm_89), 24 GB | 64 GB | [**basalt_ada**](docs/engines/basalt-ada.md) (fastest; you build it) | 146 tok/s IQ3_S near empty, 125 at 244K (*ours*, RTX 4090) | **256K** (direct NVMe parking) | Windows (tested), Linux untested | `basalt`, tested |
+| **RTX 40** (or any card Strata supports) | 64 GB | [**Strata**](docs/engines/strata.md) (easiest; prebuilt) | 105–140 tok/s IQ3_XXS (*ours*, RTX 4090) | 128K | Windows, Linux, macOS | `strata` (default), tested |
+| **≤ 12–16 GB VRAM, or < 64 GB RAM** | 30 GB+ and an NVMe with ~137 GB free | [**Strata-HotRod**](docs/engines/hotrod.md) | IQ3_S 50–70 tok/s on short answers, 34–45 on long conversations (*their hardware*: RTX 3060 12 GB, 30 GB RAM) | 131K; 262K fits | **Linux only** | `hotrod`: a remote backend through the gateway, **untested** |
+| **Anything else** (RTX 20/30, AMD Radeon, Intel Arc, Apple Silicon) | see Strata's model table | [**Strata**](docs/engines/strata.md) | Strata's [community benchmarks](https://github.com/Niko1221/Strata/blob/main/docs/COMMUNITY_BENCHMARKS.md) | per model | Windows, Linux, macOS | `strata` on Windows NVIDIA; the kit's scripts are Windows-only |
+
+- *Ours* = measured on this kit's RTX 4090 + 64 GB PC. *Theirs* = the engine's own README or community results, not
+  re-measured here.
+- An RTX 40 card with 16 GB or less: basalt_ada is untested there; use Strata, or HotRod on Linux if RAM is short.
+- Every engine needs [Jev decisions on a worker](#jev-decisions-on-a-worker): none has `/v1/decision`.
+- Setup for all of them: [Big MoE tier](#big-moe-tier-strata-basalt-or-hotrod).
 
 Inspired by Codacus' video [*Can You Run Any LLM in Jev Mode Using llama.cpp?*](https://www.youtube.com/watch?v=bcGO7xre46o).
 
@@ -488,7 +507,7 @@ with a context long enough for coding agents. Put a `remoteStt` tier first; it i
 Whisper is healthy (the router's `state\router.json`). If the worker's Whisper is gone for 8 s, the supervisor drops
 to the next tier, starts local Whisper at once and loads that tier's model 20 s later, so voice keeps working.
 
-Ran on our RTX 4090 (24 GB) from 2026-11-11 until the [Big MoE tier](#big-moe-tier-strata-default-or-basalt-opt-in)
+Ran on our RTX 4090 (24 GB) from 2026-11-11 until the [Big MoE tier](#big-moe-tier-strata-basalt-or-hotrod)
 replaced it (2026-11-18), and still the simplest big tier when you don't have ~64 GB of RAM for the MoE:
 [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b)
 (UkisAI's reasoning-efficient Qwen3.8 27B: fewer thinking tokens, better agentic coding scores) at a 96K context:
@@ -565,111 +584,44 @@ house pipeline as is.
 - **Prompt cache:** a cached Home Assistant decision takes ~0.2 s, an uncached one 0.6–0.9 s. Other callers'
   decisions with different instructions evict the cache; the model gateway re-warms it (below).
 
-### Big MoE tier: Strata (default) or Basalt (opt-in)
+### Big MoE tier: Strata, Basalt or HotRod
 
 Swift 1.5 Flash-Next (the Swift 1.5 fine-tune of Qwen3.8-Flash-Next, a 125B mixture-of-experts model) runs on one 24 GB card
-plus ~45 GB of RAM: the GPU keeps the attention layers and the most-used experts, the rest are read from RAM. Two
-engines can serve it. The tier, the supervisor, the router and the gateway are the same for both; only
-`scripts\strata-serve.ps1` changes what it starts.
+plus ~45 GB of RAM: the GPU keeps the attention layers and the most-used experts, the rest are read from RAM. The
+engine is picked with `strata.engine` in `config.json` ([Choose an engine](#choose-an-engine)):
 
-| | **Strata** (default) | **Basalt, Ada fork** (opt-in) |
+| `strata.engine` | Engine | How the kit runs it | Setup |
+|---|---|---|---|
+| `"strata"` (default) | [Strata](https://github.com/Niko1221/Strata) | local tier, started by `scripts\strata-serve.ps1` | [docs/engines/strata.md](docs/engines/strata.md) |
+| `"basalt"` | [Basalt](https://github.com/jesdga95/basalt) (RTX 50) or [basalt_ada](https://github.com/armandodollia/basalt_ada/tree/conv-cache-disk-direct) (RTX 40) | local tier, same launcher; `strata.basalt.root` / `exe` / `args` / `config` pick the build | [basalt.md](docs/engines/basalt.md), [basalt-ada.md](docs/engines/basalt-ada.md) |
+| `"hotrod"` | [Strata-HotRod](https://github.com/sangharshadhyeta/Strata-HotRod) | **remote**: runs on a Linux machine; a gateway model points at it (`url`, `backendKeyFile`). No local tier or task | [docs/engines/hotrod.md](docs/engines/hotrod.md) |
+
+For the local engines the tier, the supervisor, the router and the gateway are the same; only
+`scripts\strata-serve.ps1` changes what it starts. Our two local engines on the RTX 4090 + 64 GB:
+
+| | **Strata** | **basalt_ada** |
 |---|---|---|
-| Works on | RTX 40 / 30 and other consumer cards, out of the box | RTX 40 (sm_89) only, and you build it yourself |
 | Model file | Swift 1.5 IQ3_XXS (Strata pack) | Swift 1.5 IQ3_S (`.basalt`, converted from the GGUF): about 40% less error than IQ3_XXS (KLD 0.145 vs 0.240, from the model card) |
-| Decode (RTX 4090) | 105–140 tok/s | **146 tok/s** near an empty context; 133 / 128 / 125 at 125K / 195K / 244K |
+| Decode | 105–140 tok/s | **146 tok/s** near an empty context; 133 / 128 / 125 at 125K / 195K / 244K |
 | Prompt reading | ~4.5K tok/s at 57–98K | ~6.6K tok/s at 57–98K; 244K cold in 38 s |
-| Context on 64 GB RAM | 128K | **256K** (needs the direct-parking patch below) |
+| Context on 64 GB RAM | 128K | **256K** (direct parking, [basalt-ada.md](docs/engines/basalt-ada.md#256k-context-on-64-gb)) |
 | Switching back to a long conversation | re-read from scratch | parked on the NVMe: a 59K chat returns in 0.9 s (vs 8.9 s), a 244K chat in 1.2–1.4 s (vs 38 s) |
 | Free RAM at the lowest | ~7 GB | 5.9–6.9 GB at 256K |
 
-Both have no `/v1/decision`, so use them with [Jev decisions on a worker](#jev-decisions-on-a-worker).
+**Local engine, the short version:** install the engine and model (its page), set `strata.engine` and its settings,
+put a tier like `llm._exampleStrataTier` first in `llm.tiers`, and re-run `install.ps1`. It registers the
+`HomeLLM Strata` task for your user (the engines live in your profile); the supervisor starts and stops it. Without a
+session, or if it crashes, the tier is skipped for `external.blockMinutes` and the next tier loads.
 
-**Switching engines:** set `strata.engine` in `config.json` to `"strata"` or `"basalt"` (or pass `-Engine` to
-`scripts\strata-serve.ps1`), then let the supervisor restart the tier (`.\status.ps1 -Mode none`, then
-`-Mode auto`). The other engine's files stay installed, so going back is the same one-line change.
-
-#### Strata (default)
-
-1. Install the Strata Terminal and the model as yourself, without starting it:
-   `strata install --family swift --model IQ3_XXS --context 131072 --vision gpu --port 8081 --no-browser --yes --setup --no-start`,
-   then `strata update` once (it downloads the engine and test-starts it; free the GPU first). Add
-   `"reasoning_effort": "none"` and `"aliases": ["home"]` to the generated `strata-<model>.json` so callers that don't
-   ask for thinking (Home Assistant, mail) answer at once. Our measured settings (RTX 4090 + 64 GB): `--max-context
-   131072 --kv int8 --kv-resident 32768 --vram-reserve-mib 700 --spec 4 --spec-min-p 0.5 --prompt-cache-spread`, GPU
-   image reader: load 23 s, 23.7 GB VRAM, 115–140 tok/s from 7K to 109K tokens of context.
-2. In `config.json`: `strata.engine` = `"strata"`, `strata.runConfig` = that file, and put a tier like
-   `llm._exampleStrataTier` first in `llm.tiers` (set `external.pathPrefix` to your Strata folder; it's matched
-   against process paths). Its `upgradeDelaySec` 300 loads it only after 5 idle minutes, because loading pins RAM and
-   can stall the PC briefly.
-3. Re-run `install.ps1`. It registers the `HomeLLM Strata` task for your user (Strata lives in your profile); the
-   supervisor starts and stops it. Without a session, or if it crashes, the tier is skipped for
-   `external.blockMinutes` and the next tier loads.
-
-#### Basalt (opt-in, faster, 256K)
-
-[Basalt](https://github.com/jesdga95/basalt) is a Flash-Next engine for **NVIDIA Blackwell (sm_120) only** upstream.
-[Ex3c4Def/basalt_ada](https://github.com/Ex3c4Def/basalt_ada) (branch `fork_4090`) ports it to the RTX 4090 (sm_89)
-with fallback kernels for what Ada lacks (TMA, clusters, FP4 MMAs). Expect to build it, and to re-check after every
-upstream merge. Requirements: Windows, Visual Studio 2022 C++ tools, a CUDA 13 toolkit (the no-admin redistributable
-tree works), CMake + Ninja, Python 3.10+ with Basalt's `requirements.txt`, ~85 GB of disk for the IQ3_S pack plus room
-for parked conversations, and an NVMe for them.
-
-1. **Get the fork with the direct-parking patch.** It's one commit on top of `fork_4090`:
-   [armandodollia/basalt_ada `conv-cache-disk-direct`](https://github.com/armandodollia/basalt_ada/tree/conv-cache-disk-direct)
-   (commit `b20ab0b9`). The PR to Ex3c4Def/basalt_ada couldn't be opened: that repo only accepts PRs from
-   collaborators. Compare view: `Ex3c4Def/basalt_ada/compare/fork_4090...armandodollia:basalt_ada:conv-cache-disk-direct`.
-   ```powershell
-   git clone https://github.com/Ex3c4Def/basalt_ada; cd basalt_ada
-   git remote add fork https://github.com/armandodollia/basalt_ada; git fetch fork
-   git checkout -b home fork/conv-cache-disk-direct
-   git apply <kit>\basalt\patches\0001-any-model-name.patch   # any model name reaches the one model
-   ```
-2. **Build** for sm_89: copy `basalt\build_ada_local.bat` into the checkout, set its CUDA / venv / vcvars paths, run
-   it. It ends with `BUILD OK` in `build_local.log`; the executables land in `bin\`.
-3. **Model:** download the Swift 1.5 Flash-Next IQ3_S GGUF (both shards) and its mmproj, then convert:
-   `python tools/convert/convert.py --gguf <IQ3_S-00001-of-0000N.gguf> --mmproj <mmproj.gguf> --out Swift-FN-IQ3_S.basalt`
-   (see the fork's `docs/model-file.md`). Converted packs are slower than official `.basalt` files where those exist.
-4. **Config:** start from `basalt\basalt_home.example.json` (alias `home`, int8 KV, `kv-resident` 32768,
-   `reasoning-effort` none, 262144 context, resident experts, direct parking to a 50 GB NVMe cache). Its
-   `server.port` must be the tier's LLM port (8081 on an orchestrator).
-5. **Kit:** `strata.engine` = `"basalt"` and fill `strata.basalt` (`root`, `config`, `cudaPath`, `venvScripts`). The
-   example tier's `processMatch` already recognises Basalt's processes, so the supervisor counts its VRAM as its own
-   instead of treating it as a game and unloading it.
-
-The learned expert profile (`expert-profile-save`) improves which experts stay on the GPU over the first sessions.
-Images: first one read in 1.1 s, then 0.11 s.
-
-**4-bit (NVFP4) rejected on 64 GB:** more accurate (KLD ~0.07) but 18% of it has to stay on the SSD, which drops
-decode to 47 tok/s. Worth revisiting with 96–128 GB of RAM.
-
-#### 256K context
-
-Settings (Basalt): `"max-context": 262144`, `"kv": "int8"`, `"kv-resident": 32768`, and in `engine`:
-`"conversation-cache-disk-direct": true`, `"conversation-cache-disk-mib": 51200`, `"conversation-cache-dir"` on an
-NVMe. Leave `conversation-cache-min-free-mib` at its default **2560 (2.5 GB)**.
-
-- **Why direct parking is needed.** Basalt parks idle conversations on disk so switching back doesn't re-read them.
-  Unpatched, it first copies the whole conversation state into RAM (about 17.8 MB per 1K tokens: 4.3 GB at 244K),
-  and only does so if that much RAM is free above the 2.5 GB floor. At 256K on 64 GB only 5–5.6 GB is free, so
-  nothing above ~110K tokens could park ("skip parking (snapshot 4345 MiB exceeds available budget)") and every switch
-  back to a long conversation cost a full re-read (38 s at 244K). `--conversation-cache-disk-direct` streams the KV
-  between the session and the files through one 8 MiB buffer (`conversation-cache-disk-chunk-mib`), so the admission
-  only needs ~118 MB plus the buffer. The files are byte for byte the same as the old path's. A write between requests
-  yields to an arriving request. Off by default.
-- **Measured** (RTX 4090, 64 GB, PCIe 4.0 NVMe): a 244K conversation parks in 2.1 s and comes back in 1.2–1.4 s; recall
-  5/5 (code words at 10/50/90/98% plus a two-fact question) after restores; lowest free RAM 6.9 GB in the test, 5.9 GB
-  in daily use; decode unchanged (128 / 132 / 129 tok/s at 1.7K / 125K / 244K). Follow-ups in the same conversation
-  take 0.2 s.
-- **Keep `conversation-cache-min-free-mib` ≥ 2560.** Lowering it would also let parking work without the patch, but
-  it eats the margin that keeps Windows from running out of physical RAM while Basalt maps the model file. This PC has
-  had BSODs before, so we kept the floor and fixed parking instead.
-- **Rejected: a smaller expert RAM budget** (`resident-budget-gib`, 39.5 → 36.7 → 34.9 GiB). It raises idle free RAM
-  (5.6 → 7.3 → 9.3 GB) but no decode experts moved to the SSD; long prompts then read experts through a memory-mapped
-  view of the model file that grows back into the saved RAM, so free RAM under a long prompt went *down* (to
-  2.6–2.9 GB, where Basalt's guard fires), parking still failed, and decode at 244K fell from 125 to 118 tok/s.
-- **Without the patch**, stay at 128K on 64 GB, or add RAM (96 GB+ removes the limit).
+**Switching engines:** change `strata.engine` (or pass `-Engine` to `scripts\strata-serve.ps1`), then let the
+supervisor restart the tier (`.\status.ps1 -Mode none`, then `-Mode auto`). The other engine's files stay installed, so
+going back is the same one-line change. For `hotrod`, also remove the external tier (there's nothing to load locally)
+and re-run `install.ps1`, which then skips the task.
 
 #### Gaming
+
+These apply to the local engines (Strata, Basalt, basalt_ada). **The supervisor can't unload a remote HotRod box**; it
+doesn't need to, since that box's GPU isn't the one you game on ([hotrod.md](docs/engines/hotrod.md#gaming-and-unloading)).
 
 - **A game or stream start unloads the big model within seconds** (tested: 23.7 → 0.95 GB in 6 s with Strata,
   Basalt gone within 12 s, 4090 at 1.1 GB used). Chat falls back to the worker through the router.
@@ -695,7 +647,8 @@ backend and, optionally, a mode:
 
 | Field | Meaning |
 |---|---|
-| `url`, `kind` | backend (`chat`), or `jev`: the last user message becomes a decision (choices from `options: a \| b \| c`, a `[a\|b]` bracket or `- a` bullets, else yes/no; a pasted JSON decision body is sent as is) |
+| `url`, `kind` | backend (`chat`; may be another machine, e.g. a [HotRod](docs/engines/hotrod.md) box), or `jev`: the last user message becomes a decision (choices from `options: a \| b \| c`, a `[a\|b]` bracket or `- a` bullets, else yes/no; a pasted JSON decision body is sent as is) |
+| `backendKeyFile`, `backendModel` | the backend's own API key (a file whose first line is the key, sent as `Authorization: Bearer`; relative to the kit folder, re-read each call) and the model name to send instead of `llm.alias` |
 | `effort` / `think` | thinking forced per model: `reasoning_effort` none/low/medium/high (Strata/Basalt/Qwen) or `enable_thinking` (Gemma). **Leave both out** to pass the client's own `reasoning_effort` / `chat_template_kwargs` through |
 | `reasoningBudget` | hard cap on thinking tokens (`reasoning_budget_tokens`) |
 | `chatOnly`, `promptBudget`, `maxReply` | for small-context models: drop tools, replace a long agent system prompt, trim old turns |
@@ -827,9 +780,11 @@ commands are kept; a backup is written next to the config).
 | `tailscale serve` failed | Enable MagicDNS and HTTPS certificates in the Tailscale admin console, then re-run the installer. |
 | Supervisor stopped logging while you watched the log | Fixed: a reader holding `supervisor.log` open made a log write fail inside the error handler. Log writes now retry and never stop the supervisor. |
 | Strata/Basalt tier never loads / "skipped for 15 min" | The `HomeLLM Strata` task couldn't start (you weren't logged on) or the engine exited; see `logs\strata-serve.log` (it names the engine). The tier also needs a worker's Whisper and decisions (`remoteStt`, `remoteDecision`). |
-| Basalt starts, then the supervisor unloads it again and again | The supervisor counts Basalt's VRAM as another program: make the tier's `external.processMatch` match Basalt's processes (the example matches `basalt_home.json` and `\basalt_ada\bin\basalt`). |
+| Basalt starts, then the supervisor unloads it again and again | The supervisor counts Basalt's VRAM as another program: make the tier's `external.processMatch` match Basalt's processes (the example matches `basalt_home.json`, `basalt_blackwell.json` and `\basalt...\bin\basalt`). |
+| `strata-serve.log`: "strata.engine is hotrod" | HotRod runs on another machine: remove the external tier from `llm.tiers` and use a gateway model pointing at it ([hotrod.md](docs/engines/hotrod.md)). |
+| Gateway: a HotRod model is always down / 401 | Check `url` and that the box's `/health` answers from this PC; `backendKeyFile`'s first line must be the key HotRod was started with. |
 | Basalt: "unknown model" for a client name | Apply `basalt\patches\0001-any-model-name.patch` and keep `strata.basalt.anyModelName` on; re-apply after every `git pull` of the fork. |
-| Basalt at 256K: switching back to a long chat is slow (~38 s), log says "skip parking" | Direct parking is off or the build lacks it: use the `conv-cache-disk-direct` branch and `"conversation-cache-disk-direct": true`. Don't lower `conversation-cache-min-free-mib` instead (see 256K context). |
+| Basalt at 256K: switching back to a long chat is slow (~38 s), log says "skip parking" | Direct parking is off or the build lacks it: use the `conv-cache-disk-direct` branch and `"conversation-cache-disk-direct": true`. Don't lower `conversation-cache-min-free-mib` instead ([basalt-ada.md](docs/engines/basalt-ada.md#256k-context-on-64-gb)). |
 | Gateway answers 503 "isn't loaded" | The model's `requireTier`/`requireModel`/`healthCheck` isn't met (PC gaming, worker off) and it has no `whenDown: "hold"`. Pick another model. |
 | An agent request hangs for minutes while you game | Expected with `whenDown: "hold"`: `gateway.log` shows `HOLD`. It runs once the big model is back (at most `hold.maxHours`). Small requests without tools go to the fallback instead. |
 | A client times out during a hold | Raise its request timeout above `hold.maxHours`: OpenCode `options.timeout`, Hermes `request_timeout_seconds` / `stale_timeout_seconds` / `agent.gateway_timeout` (Client templates). |
@@ -853,9 +808,11 @@ scripts\router.py          multi-PC router + Wake-on-LAN + decision port (task H
 scripts\gateway.py         model gateway: every model/mode behind one API key (task HomeLLM Gateway)
 scripts\ha_payload.py      rebuilds homellm_assist's decision payload from live HA (gateway re-warm, eval)
 scripts\strata-serve.ps1   serves the big MoE model with Strata or Basalt (strata.engine) for an external tier
-                           (task HomeLLM Strata, runs as you)
-basalt\                    Basalt (opt-in engine): basalt_home.example.json, build_ada_local.bat,
-                           patches\0001-any-model-name.patch
+                           (task HomeLLM Strata, runs as you); engine hotrod is remote and not started here
+docs\engines\              one setup page per big-model engine: strata, basalt, basalt-ada, hotrod
+basalt\                    Basalt: basalt_home.example.json (RTX 40, basalt_ada), basalt_blackwell.example.json
+                           (RTX 50), build_ada_local.bat, patches\0001-any-model-name.patch
+engines\hotrod\            Strata-HotRod (Linux box): run-hotrod.example.sh, config-additions.example.json
 clients\                   opencode.example.json, hermes-config.example.yaml, hermes_acp_bridge.py (T3 Code on
                            other machines -> Hermes over ACP)
 eval\run_eval.py           decision accuracy/latency test; cases.example.json to start from

@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "models": [
+    {
+      "model": "C:/Users/<you>/llm/basalt-models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+      "alias": "home",
+      "gpu": "0",
+      "kv": "int8",
+      "max-context": 262144,
+      "kv-resident": 32768,
+      "reasoning-effort": "none"
+    }
+  ],
+  "engine": {
+    "resident-experts": true,
+    "expert-profile-save": "C:/Users/<you>/llm/basalt-models/flash-next-learned.prof",
+    "conversation-cache-disk-mib": 51200,
+    "conversation-cache-dir": "C:/Users/<you>/llm/basalt-models/conv-cache"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8081
+  }
+}

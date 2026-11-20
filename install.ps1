@@ -367,8 +367,14 @@ if (-not $SkipTasks) {
     }
     # Big MoE tier (README > Big MoE tier): the server (Strata or Basalt, strata.engine) runs as YOU (it lives in your
     # profile), started/stopped by homellm.ps1 through this task. Needs you logged on; without a session the tier is
-    # skipped.
-    if (@($cfg.llm.tiers | Where-Object { $_.external }).Count -and ($cfg.strata.runConfig -or "$($cfg.strata.engine)" -eq 'basalt')) {
+    # skipped. Strata-HotRod (engine hotrod) runs on another machine and is reached through the gateway: no task.
+    $bigEngine = $(if ($cfg.strata.engine) { "$($cfg.strata.engine)".ToLowerInvariant() } else { 'strata' })
+    if ($bigEngine -eq 'hotrod') {
+        Ok "strata.engine is hotrod: no local task (point a gateway model at the HotRod server, docs\engines\hotrod.md)"
+        if (@($cfg.llm.tiers | Where-Object { $_.external }).Count) {
+            Warn "llm.tiers still has an external tier; with engine hotrod it can't start here. Remove it."
+        }
+    } elseif (@($cfg.llm.tiers | Where-Object { $_.external }).Count -and ($cfg.strata.runConfig -or $bigEngine -eq 'basalt')) {
         $task = @($cfg.llm.tiers | Where-Object { $_.external } | Select-Object -First 1)[0].external.task
         if (-not $task) { $task = 'HomeLLM Strata' }
         $action = New-ScheduledTaskAction -Execute 'conhost.exe' `

@@ -1,5 +1,5 @@
 @echo off
-rem Builds the Basalt Ada fork (sm_89, RTX 40) for the kit's Basalt engine (README > Basalt).
+rem Builds the Basalt Ada fork (sm_89, RTX 40) for the kit's Basalt engine (docs\engines\basalt-ada.md).
 rem Copy into your basalt_ada checkout and set the three paths. Output: bin\basalt.exe; log: build_local.log.
 rem Needs Visual Studio 2022 (Desktop development with C++), a CUDA 13 toolkit (the no-admin redistributable tree
 rem works), and a Python venv with Basalt's requirements.txt plus ninja.

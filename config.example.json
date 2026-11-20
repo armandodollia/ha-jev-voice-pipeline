@@ -33,18 +33,20 @@
       { "name": "strata", "maxOthersMiB": 2304, "whisper": false, "remoteStt": true, "remoteDecision": true,
         "upgradeMarginMiB": 768, "upgradeDelaySec": 300,
         "external": { "task": "HomeLLM Strata", "label": "Swift 1.5 Flash-Next (Strata or Basalt)",
-          "processMatch": "strata-serve\\.ps1|basalt_home\\.json|\\\\basalt_ada\\\\bin\\\\basalt","pathPrefix": "C:\\Users\\you\\AppData\\Local\\Strata\\",
+          "processMatch": "strata-serve\\.ps1|basalt_home\\.json|basalt_blackwell\\.json|\\\\basalt(_ada)?[^\\\\]*\\\\bin\\\\basalt","pathPrefix": "C:\\Users\\you\\AppData\\Local\\Strata\\",
           "estMiB": 21000, "blockMinutes": 15 } }
   },
 
   "strata": {
-    "_comment": "README > Big MoE tier. engine: strata (default: works out of the box on RTX 40/30) or basalt (opt-in: faster, 256K context; build it first, README > Basalt). runConfig: the strata-<model>.json that `strata install --setup --no-start` wrote (environment variables are expanded); strataCmd: optional path of strata.cmd",
+    "_comment": "README > Choose an engine, and docs/engines/. engine: strata (default: works out of the box on RTX 20-50), basalt (opt-in: upstream Basalt on RTX 50 or the basalt_ada fork on RTX 40; faster, 256K context) or hotrod (Strata-HotRod: Linux only, runs on another machine; no local task, use a gateway model with its url, docs/engines/hotrod.md). runConfig: the strata-<model>.json that `strata install --setup --no-start` wrote (environment variables are expanded); strataCmd: optional path of strata.cmd",
     "engine": "strata",
     "runConfig": "%LOCALAPPDATA%\\Strata\\install\\strata-swift-iq3_xxs.json",
     "strataCmd": "",
     "basalt": {
-      "_comment": "used when engine is basalt. config: start from basalt\\basalt_home.example.json; its server.port must be the tier's LLM port (cluster.localPorts.llm on an orchestrator). anyModelName needs basalt\\patches\\0001-any-model-name.patch",
+      "_comment": "used when engine is basalt, for upstream Basalt (RTX 50) and basalt_ada (RTX 40) alike. root: the checkout or unpacked release; exe: optional, default bin\\basalt.exe under root; args: optional extra serve arguments. config: start from basalt\\basalt_blackwell.example.json (RTX 50) or basalt\\basalt_home.example.json (RTX 40); its server.port must be the tier's LLM port (cluster.localPorts.llm on an orchestrator). cudaPath / venvScripts: leave empty when CUDA 13 is on PATH and a release archive's own .venv is used. anyModelName needs basalt\\patches\\0001-any-model-name.patch (the gateway sends the alias anyway)",
       "root": "C:\\Users\\you\\llm\\basalt_ada",
+      "exe": "",
+      "args": [],
       "config": "C:\\Users\\you\\llm\\basalt-models\\basalt_home.json",
       "cudaPath": "C:\\Users\\you\\llm\\cuda-redist\\cuda-13.4.3",
       "venvScripts": "C:\\Users\\you\\llm\\basalt_venv\\Scripts",
@@ -130,6 +132,9 @@
       { "id": "strata-swift-low",    "name": "Swift 1.5 125B - thinking low, 4K cap (fixed-effort alias)", "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "low", "reasoningBudget": 4096, "requireTier": "strata", "healthCheck": true, "whenDown": "hold", "ctx": 131072 },
       { "id": "gemma-worker",        "name": "Gemma 4 12B (worker) - chat only",                "kind": "chat", "url": "http://192.168.1.50:8080", "think": false, "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
       { "id": "gemma-worker-think",  "name": "Gemma 4 12B (worker) - chat only, thinking",      "kind": "chat", "url": "http://192.168.1.50:8080", "think": true,  "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
+      { "id": "swift-hotrod-remote", "name": "Qwen3.8 Flash-Next on a Linux Strata-HotRod box (example; remove if unused)", "kind": "chat", "url": "http://linux-box.example-tailnet.ts.net:8095",
+        "backendKeyFile": "backend-keys\\hotrod.txt", "healthCheck": true, "whenDown": "hold", "ctx": 131072,
+        "_comment": "docs/engines/hotrod.md. A remote engine: no requireTier (the supervisor can't load or unload it for games). backendKeyFile holds the key HotRod was started with (--api-key) and is git-ignored. Give HotRod's config \"aliases\": [\"home\"] or set backendModel here" },
       { "id": "jev-decision",        "name": "Jev decision - fixed-choice answers",             "kind": "jev", "ctx": 4096 }
     ]
   },
