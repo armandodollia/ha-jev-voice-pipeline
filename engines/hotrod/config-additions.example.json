@@ -1,0 +1,6 @@
+{
+  "_comment": "Keys to ADD to the config Strata-HotRod's setup.sh wrote (e.g. strata-iq3_s.json): top-level server settings, next to its own exe/args/env. aliases lets the kit's gateway send the model name 'home'; reasoning_effort none makes requests without an effort answer at once (Home Assistant, mail). idle_unload_s optionally frees the remote card's VRAM after N idle seconds. For 262K context, set --max-context 262144 in its \"args\" (HotRod README). Delete this _comment key.",
+  "aliases": ["home"],
+  "reasoning_effort": "none",
+  "idle_unload_s": 1800
+}

@@ -1,0 +1,39 @@
+# The home-model parts of a Hermes Agent config.yaml (merge into yours; everything else stays as Hermes wrote it).
+# README > Client templates. Keys: put the gateway key where Hermes reads secrets (e.g. its .env), never in this file
+# if it is shared.
+
+model:
+  default: swift-1.5-125b-strata
+  provider: "custom:home-4090"
+
+providers:
+  home-4090:
+    name: "Swift 1.5 125B (4090, 256K) via the home gateway; held while the 4090 games"
+    api: "http://127.0.0.1:8090/v1"            # on the gaming PC; elsewhere https://<pc>.<your-tailnet>.ts.net:8446/v1
+    api_key: "<gateway key for this machine>"
+    discover_models: false
+    request_timeout_seconds: 15300             # > gateway hold.maxHours (4 h), so a held request isn't cut off
+    stale_timeout_seconds: 15300
+    models:
+      swift-1.5-125b-strata:
+        context_length: 262144                 # 131072 with the Strata engine
+    default_model: swift-1.5-125b-strata
+    # No extra_body.chat_template_kwargs here: a reasoning_effort in it outranks the request's own and silently
+    # overrides the effort selector.
+
+  home-worker:
+    name: "Gemma 4 12B on the worker (4K context, tuned for Jev decisions)"
+    api: "http://<worker-ip>:8080/v1"
+    api_key: "none"
+    discover_models: false
+    models:
+      gemma-4-12b-worker:
+        context_length: 4096
+
+agent:
+  gateway_timeout: 15300
+  reasoning_effort: medium                     # cloud and other models
+  reasoning_overrides:
+    swift-1.5-125b-strata: low                 # home model default; T3 Code's selector overrides it per session
+
+fallback_providers: []                         # local-first: no silent cloud fallback

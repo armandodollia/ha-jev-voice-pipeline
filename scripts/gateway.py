@@ -2,8 +2,11 @@
 (OpenCode / T3 Code), Hermes and other machines on the tailnet can pick them by name. README > Model gateway.
 
 Everything comes from config.json "gateway":
-  port, keyFile       listen on 127.0.0.1:<port>; every request needs "Authorization: Bearer <key in keyFile>"
-                      (install.ps1 creates the key). tailscale.serve.gateway publishes it over tailnet HTTPS.
+  port, keyFile       listen on 127.0.0.1:<port>; every request needs "Authorization: Bearer <key>"
+                      (install.ps1 creates keyFile). tailscale.serve.gateway publishes it over tailnet HTTPS.
+  keyDir              optional folder of per-machine keys: each <label>.txt holds one key, logged as [<label>].
+                      Keys are re-read on every request, so deleting a file cuts that machine off at once.
+  hold                {maxHours, keepaliveSec, pollSec} for models with whenDown "hold" (defaults 4 / 15 / 5)
   decisionUrl         where Jev /v1/decision goes (default: the router's decision port, else the LLM port)
   rewarm              {enabled, delaySec, rebuildEverySec}: after a decision from anyone but Home Assistant, re-send
                       Home Assistant's exact decision payload (rebuilt from live HA by ha_payload.py) so its prompt is
@@ -11,18 +14,34 @@ Everything comes from config.json "gateway":
   models[]            one entry per selectable model/mode:
     id, name, ctx     model id clients send, display name, context window
     kind              "chat" (proxied to url) or "jev" (the last user message becomes a /v1/decision call)
-    url               backend base URL (llama-server, Strata, ...), for kind chat
-    effort            thinking level forced on the request: none|low|medium|high (Strata / Qwen-style templates)
+    url               backend base URL (llama-server, Strata, Basalt, ...), for kind chat. It may be another machine,
+                      e.g. Strata-HotRod on a Linux box (docs/engines/hotrod.md): the supervisor can't unload a remote
+                      engine for games, so give such a model healthCheck and no requireTier
+    backendKeyFile    optional file whose first line is the backend's own API key, sent as "Authorization: Bearer" on
+                      every call to url (chat, /health, /props). Relative paths are under the kit folder; environment
+                      variables are expanded. Re-read on every call. For a backend started with --api-key
+    backendModel      optional model name sent to the backend instead of llm.alias (e.g. when the backend has no
+                      "home" alias)
+    effort            thinking level forced on the request: none|low|medium|high (Strata / Qwen-style templates).
+                      Leave it out to pass the client's own reasoning_effort / chat_template_kwargs through (one model
+                      id with an effort selector in the client, e.g. OpenCode variants or Hermes' reasoning_effort)
     think             true/false: chat_template_kwargs.enable_thinking (Gemma / llama.cpp templates)
     reasoningBudget   hard cap on thinking tokens (Strata's reasoning_budget_tokens)
     chatOnly          drop tools, replace a long agent system prompt and trim old turns (small-context models)
     promptBudget, maxReply   with chatOnly: estimated prompt tokens to keep, and the reply cap
     requireTier       answer 503 unless state\\status.json says this tier is loaded (e.g. "strata": idle-only models)
     requireModel      answer 503 unless the backend's /props model_path contains this text (e.g. "gemma")
+    healthCheck       also require GET <url>/health to answer 200 before the model counts as up
+    fallback          id of another chat model that takes a request while this one is down, if the request has no
+                      tools and its estimated prompt fits that model's promptBudget (e.g. Gemma on a worker GPU)
+    whenDown          "fail" (default: 503) or "hold": keep the client's connection open with keepalives until the
+                      model is up again (at most hold.maxHours), then run the request. Nothing is loaded for it: the
+                      supervisor brings the tier back on its own schedule (after a game ends, idle delays).
 Runs as the SYSTEM task "HomeLLM Gateway" with the kit's voice Python (needs aiohttp).
 """
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,7 +54,9 @@ from aiohttp import ClientSession, ClientTimeout, web
 ROOT = Path(__file__).resolve().parent.parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
 GW = CFG.get("gateway") or {}
-KEY = (ROOT / GW.get("keyFile", "gateway-key.txt")).read_text(encoding="utf-8").strip()
+KEY_FILE = ROOT / GW.get("keyFile", "gateway-key.txt")
+KEY_DIR = (ROOT / GW["keyDir"]) if GW.get("keyDir") else None
+HOLD = {"maxHours": 4, "keepaliveSec": 15, "pollSec": 5, **(GW.get("hold") or {})}
 STATUS_FILE = ROOT / "state" / "status.json"
 LOG = ROOT / "logs" / "gateway.log"
 HA_PAYLOAD = ROOT / "state" / "ha_payload.json"
@@ -47,6 +68,22 @@ REWARM = {"enabled": True, "delaySec": 1.5, "rebuildEverySec": 900, **(GW.get("r
 MODELS = {m["id"]: m for m in GW.get("models", [])}
 SHORT_SYSTEM = ("You are a helpful assistant running locally on the user's home GPU. You cannot use tools or see "
                 "files in this mode; answer from the conversation. Be concise.")
+
+
+def load_keys():
+    """key -> label. keyFile is "default"; every keyDir/<label>.txt adds one key per machine."""
+    keys = {}
+    try:
+        keys[KEY_FILE.read_text(encoding="utf-8").strip()] = "default"
+    except OSError:
+        pass
+    if KEY_DIR and KEY_DIR.is_dir():
+        for f in KEY_DIR.glob("*.txt"):
+            k = f.read_text(encoding="utf-8").strip()
+            if k:
+                keys[k] = f.stem
+    keys.pop("", None)
+    return keys
 
 
 def log(msg):
@@ -66,6 +103,22 @@ def err(status, message, etype="unavailable"):
     return web.json_response({"error": {"message": message, "type": etype, "code": status}}, status=status)
 
 
+def backend_headers(m):
+    """Authorization for a backend that wants its own key (backendKeyFile), else none."""
+    f = m.get("backendKeyFile")
+    if not f:
+        return {}
+    path = Path(os.path.expandvars(str(f)))
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        key = path.read_text(encoding="utf-8-sig").splitlines()[0].strip()
+    except (OSError, IndexError):
+        log(f"{m.get('id')}: backendKeyFile {path} unreadable; calling the backend without a key")
+        return {}
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def text_of(content):
     if isinstance(content, str):
         return content
@@ -82,8 +135,11 @@ def est_tokens(messages):
 async def auth(request, handler):
     if request.path in ("/health", "/"):
         return await handler(request)
-    if request.headers.get("Authorization", "") != f"Bearer {KEY}":
+    h = request.headers.get("Authorization", "")
+    label = load_keys().get(h[7:].strip()) if h.startswith("Bearer ") else None
+    if not label:
         return err(401, "missing or wrong API key", "auth")
+    request["client"] = label
     return await handler(request)
 
 
@@ -98,9 +154,9 @@ async def list_models(_):
          "context_length": m.get("ctx")} for mid, m in MODELS.items()]})
 
 
-async def proxy(request, url, body):
+async def proxy(request, url, body, headers=None):
     """POST body to url and pass the reply through, streaming when the client asked for it."""
-    async with request.app["session"].post(url, json=body) as up:
+    async with request.app["session"].post(url, json=body, headers=headers or {}) as up:
         if not body.get("stream"):
             return web.Response(body=await up.read(), status=up.status, content_type=up.content_type)
         resp = web.StreamResponse(status=up.status, headers={
@@ -112,9 +168,10 @@ async def proxy(request, url, body):
         return resp
 
 
-async def backend_model(request, url):
+async def backend_model(request, url, headers=None):
     try:
-        async with request.app["session"].get(f"{url}/props", timeout=ClientTimeout(total=3)) as r:
+        async with request.app["session"].get(f"{url}/props", headers=headers or {},
+                                              timeout=ClientTimeout(total=3)) as r:
             return (await r.json(content_type=None)).get("model_path", "")
     except Exception:
         return ""
@@ -142,28 +199,105 @@ def chat_only(body, m):
     body["max_tokens"] = min(int(asked) if asked else cap, cap)
 
 
-async def chat_model(request, body, m):
-    if m.get("requireTier") and tier() != m["requireTier"]:
-        return err(503, f"{m.get('name', m['id'])} isn't loaded right now (tier: {tier()}); it runs only in tier "
-                        f"'{m['requireTier']}'. Pick another model or try again later.")
+async def backend_health(request, url, headers=None):
+    try:
+        async with request.app["session"].get(f"{url}/health", headers=headers or {},
+                                              timeout=ClientTimeout(total=3)) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+async def is_up(request, m):
+    """(up, reason): requireTier, requireModel and healthCheck all hold."""
     url = m["url"].rstrip("/")
-    if m.get("requireModel") and m["requireModel"].lower() not in (await backend_model(request, url)).lower():
-        return err(503, f"{m.get('name', m['id'])} isn't loaded on its machine right now (off, asleep or busy).")
-    body["model"] = CFG["llm"].get("alias", "home")
-    kwargs = body.setdefault("chat_template_kwargs", {})
+    if m.get("requireTier") and tier() != m["requireTier"]:
+        return False, f"tier is {tier()}, needs '{m['requireTier']}'"
+    hdr = backend_headers(m)
+    if m.get("requireModel") and m["requireModel"].lower() not in (await backend_model(request, url, hdr)).lower():
+        return False, f"no '{m['requireModel']}' model loaded on its machine"
+    if m.get("healthCheck") and not await backend_health(request, url, hdr):
+        return False, "backend /health failed"
+    return True, ""
+
+
+def prepare(body, m):
+    """Model name and thinking settings for the backend. Without effort/think the client's own settings pass."""
+    body["model"] = m.get("backendModel") or CFG["llm"].get("alias", "home")
     if "effort" in m:
+        kwargs = body.setdefault("chat_template_kwargs", {})
         body["reasoning_effort"] = m["effort"]
         kwargs["enable_thinking"] = m["effort"] != "none"
         kwargs["reasoning_effort"] = m["effort"]
     if "think" in m:
-        kwargs["enable_thinking"] = bool(m["think"])
+        body.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(m["think"])
         body.pop("reasoning_effort", None)
         body.pop("reasoning", None)
     if m.get("reasoningBudget"):
         body["reasoning_budget_tokens"] = int(m["reasoningBudget"])
     if m.get("chatOnly"):
         chat_only(body, m)
-    return await proxy(request, f"{url}/v1/chat/completions", body)
+
+
+async def chat_model(request, body, m):
+    up, why = await is_up(request, m)
+    if not up:
+        fb = MODELS.get(m.get("fallback") or "")
+        if (fb and not body.get("tools") and est_tokens(body.get("messages", [])) <= int(fb.get("promptBudget", 2600))
+                and (await is_up(request, fb))[0]):
+            log(f"[{request.get('client')}] {m['id']} down ({why}): small request without tools -> {fb['id']}")
+            m = fb
+        elif m.get("whenDown") == "hold":
+            return await hold(request, body, m, why)
+        else:
+            return err(503, f"{m.get('name', m['id'])} isn't loaded right now ({why}). Pick another model or try "
+                            "again later.")
+    prepare(body, m)
+    return await proxy(request, f"{m['url'].rstrip('/')}/v1/chat/completions", body, backend_headers(m))
+
+
+async def hold(request, body, m, why):
+    """Keep the client's connection open until the model is up (or hold.maxHours pass), then answer from it. A
+    streaming reply gets an SSE comment line, a plain one a leading space, every hold.keepaliveSec; clients ignore
+    both. Clients need a request timeout longer than maxHours (README > Client templates)."""
+    client, stream = request.get("client"), bool(body.get("stream"))
+    max_h, beat, poll = float(HOLD["maxHours"]), float(HOLD["keepaliveSec"]), float(HOLD["pollSec"])
+    log(f"[{client}] HOLD {m['id']}: down ({why}), ~{est_tokens(body.get('messages', []))} tokens, "
+        f"tools={len(body.get('tools') or [])}: waiting up to {max_h:g} h")
+    resp = web.StreamResponse(status=200, headers={
+        "Content-Type": "text/event-stream" if stream else "application/json", "Cache-Control": "no-cache",
+        "X-Home-Queued": f"waiting for {m['id']}"})
+    await resp.prepare(request)
+    t0 = last = time.monotonic()
+    try:
+        while not (await is_up(request, m))[0]:
+            now = time.monotonic()
+            if now - t0 > max_h * 3600:
+                log(f"[{client}] HOLD {m['id']} gave up after {(now - t0) / 60:.0f} min")
+                msg = {"error": {"message": f"{m.get('name', m['id'])} stayed unavailable for {max_h:g} h; try "
+                                            "again later", "type": "unavailable", "code": 503}}
+                await resp.write((f"data: {json.dumps(msg)}\n\ndata: [DONE]\n\n" if stream
+                                  else json.dumps(msg)).encode())
+                await resp.write_eof()
+                return resp
+            if now - last >= beat:
+                await resp.write(f": queued, waiting for {m['id']} ({(now - t0) / 60:.1f} min)\n\n".encode()
+                                 if stream else b" ")
+                last = now
+            await asyncio.sleep(poll)
+    except (ConnectionResetError, asyncio.CancelledError):
+        log(f"[{client}] HOLD {m['id']}: the client left after {(time.monotonic() - t0) / 60:.1f} min")
+        raise
+    log(f"[{client}] HOLD {m['id']} over after {(time.monotonic() - t0) / 60:.1f} min: running the request")
+    prepare(body, m)
+    async with request.app["session"].post(f"{m['url'].rstrip('/')}/v1/chat/completions", json=body,
+                                           headers=backend_headers(m)) as up:
+        if up.status != 200:
+            log(f"[{client}] after HOLD {m['id']} answered {up.status}")
+        async for chunk in up.content.iter_any():
+            await resp.write(chunk)
+    await resp.write_eof()
+    return resp
 
 
 OPTION_LINE = re.compile(r"^\s*(?:options?|choices?)\s*:\s*(.+)$", re.I | re.M)
@@ -300,7 +434,7 @@ async def chat(request):
     m = MODELS.get(mid)
     if not m:
         return err(404, f"unknown model {mid!r}; choose one of: {', '.join(MODELS)}", "invalid_request_error")
-    log(f"{mid} stream={bool(body.get('stream'))} msgs={len(body.get('messages', []))} tools={len(body.get('tools') or [])}")
+    log(f"[{request.get('client')}] {mid} stream={bool(body.get('stream'))} msgs={len(body.get('messages', []))} tools={len(body.get('tools') or [])}")
     try:
         return await (jev_model if m.get("kind") == "jev" else chat_model)(request, body, m)
     except asyncio.TimeoutError:
@@ -311,7 +445,8 @@ async def chat(request):
 
 
 async def on_startup(app):
-    app["session"] = ClientSession(timeout=ClientTimeout(total=1800, sock_connect=5))
+    # no total limit: a held request and a long 256K prefill plus reply can take far longer than 30 min
+    app["session"] = ClientSession(timeout=ClientTimeout(total=None, sock_connect=5, sock_read=3600))
     if REWARM["enabled"]:
         app["payload_task"] = asyncio.create_task(ha_payload_loop(app))
 

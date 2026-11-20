@@ -28,19 +28,30 @@
       { "name": "voice", "maxOthersMiB": 19456, "whisper": true },
       { "name": "none",  "whisper": false }
     ],
-    "_tierOptions": "Optional per tier: upgradeMarginMiB; upgradeDelaySec (idle seconds before upgrading INTO this tier); remoteStt / remoteDecision (allowed only while a worker's Whisper / Jev decisions are healthy, via router.py); model.estMiB (VRAM footprint to plan with); external (a server started by a scheduled task, e.g. Strata: README > Strata tier). The example below goes first in tiers to use it.",
+    "_tierOptions": "Optional per tier: upgradeMarginMiB; upgradeDelaySec (idle seconds before upgrading INTO this tier); remoteStt / remoteDecision (allowed only while a worker's Whisper / Jev decisions are healthy, via router.py); model.estMiB (VRAM footprint to plan with); external (a server started by a scheduled task, e.g. Strata or Basalt: README > Big MoE tier). The example below goes first in tiers to use it.",
     "_exampleStrataTier":
       { "name": "strata", "maxOthersMiB": 2304, "whisper": false, "remoteStt": true, "remoteDecision": true,
         "upgradeMarginMiB": 768, "upgradeDelaySec": 300,
-        "external": { "task": "HomeLLM Strata", "label": "Strata: Swift 1.5 Flash-Next IQ3_XXS",
-          "processMatch": "strata-serve\\.ps1", "pathPrefix": "C:\\Users\\you\\AppData\\Local\\Strata\\",
+        "external": { "task": "HomeLLM Strata", "label": "Swift 1.5 Flash-Next (Strata or Basalt)",
+          "processMatch": "strata-serve\\.ps1|basalt_home\\.json|basalt_blackwell\\.json|\\\\basalt(_ada)?[^\\\\]*\\\\bin\\\\basalt","pathPrefix": "C:\\Users\\you\\AppData\\Local\\Strata\\",
           "estMiB": 21000, "blockMinutes": 15 } }
   },
 
   "strata": {
-    "_comment": "README > Strata tier. runConfig: the strata-<model>.json that `strata install --setup --no-start` wrote (environment variables are expanded); strataCmd: optional path of strata.cmd",
+    "_comment": "README > Choose an engine, and docs/engines/. engine: strata (default: works out of the box on RTX 20-50), basalt (opt-in: upstream Basalt on RTX 50 or the basalt_ada fork on RTX 40; faster, 256K context) or hotrod (Strata-HotRod: Linux only, runs on another machine; no local task, use a gateway model with its url, docs/engines/hotrod.md). runConfig: the strata-<model>.json that `strata install --setup --no-start` wrote (environment variables are expanded); strataCmd: optional path of strata.cmd",
+    "engine": "strata",
     "runConfig": "%LOCALAPPDATA%\\Strata\\install\\strata-swift-iq3_xxs.json",
-    "strataCmd": ""
+    "strataCmd": "",
+    "basalt": {
+      "_comment": "used when engine is basalt, for upstream Basalt (RTX 50) and basalt_ada (RTX 40) alike. root: the checkout or unpacked release; exe: optional, default bin\\basalt.exe under root; args: optional extra serve arguments. config: start from basalt\\basalt_blackwell.example.json (RTX 50) or basalt\\basalt_home.example.json (RTX 40); its server.port must be the tier's LLM port (cluster.localPorts.llm on an orchestrator). cudaPath / venvScripts: leave empty when CUDA 13 is on PATH and a release archive's own .venv is used. anyModelName needs basalt\\patches\\0001-any-model-name.patch (the gateway sends the alias anyway)",
+      "root": "C:\\Users\\you\\llm\\basalt_ada",
+      "exe": "",
+      "args": [],
+      "config": "C:\\Users\\you\\llm\\basalt-models\\basalt_home.json",
+      "cudaPath": "C:\\Users\\you\\llm\\cuda-redist\\cuda-13.4.3",
+      "venvScripts": "C:\\Users\\you\\llm\\basalt_venv\\Scripts",
+      "anyModelName": true
+    }
   },
 
   "vram": {
@@ -105,17 +116,25 @@
     "enabled": false,
     "port": 8090,
     "keyFile": "gateway-key.txt",
+    "keyDir": "gateway-keys",
+    "_keyDir": "optional: one <label>.txt per machine, each holding one key (the label shows in gateway.log). Re-read on every request: delete a file to cut that machine off",
+    "hold": { "maxHours": 4, "keepaliveSec": 15, "pollSec": 5,
+      "_comment": "models with whenDown hold: keep the request open (SSE comment lines / leading spaces as keepalive) until the model is back, then run it. Clients need a timeout above maxHours (README > Client templates)" },
     "decisionUrl": "",
     "_decisionUrl": "where Jev decisions go; empty = the router's decision port (cluster.decisionPort), else llm.port",
     "rewarm": { "enabled": true, "delaySec": 1.5, "rebuildEverySec": 900,
       "_comment": "after other callers' decisions, re-send Home Assistant's decision payload (scripts\\ha_payload.py) so its prompt stays cached" },
     "models": [
-      { "id": "strata-swift-none",   "name": "Swift 1.5 125B (Strata) - no thinking",          "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "none",   "requireTier": "strata", "ctx": 131072 },
-      { "id": "strata-swift-low",    "name": "Swift 1.5 125B (Strata) - thinking low (4K cap)", "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "low", "reasoningBudget": 4096, "requireTier": "strata", "ctx": 131072 },
-      { "id": "strata-swift-medium", "name": "Swift 1.5 125B (Strata) - thinking medium",      "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "medium", "requireTier": "strata", "ctx": 131072 },
-      { "id": "strata-swift-high",   "name": "Swift 1.5 125B (Strata) - thinking high",        "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "high",   "requireTier": "strata", "ctx": 131072 },
+      { "id": "swift-1.5-125b-strata", "name": "Swift 1.5 125B (4090) - thinking from the client's effort selector", "kind": "chat", "url": "http://127.0.0.1:8081",
+        "requireTier": "strata", "healthCheck": true, "fallback": "gemma-worker", "whenDown": "hold", "ctx": 131072,
+        "_comment": "no effort field: the client's reasoning_effort / chat_template_kwargs pass through (OpenCode variants, Hermes' selector); with none sent, the engine's default (reasoning_effort none) applies. While the tier is down (gaming): no tools and a short prompt -> fallback, anything else is held. ctx 262144 with Basalt" },
+      { "id": "strata-swift-none",   "name": "Swift 1.5 125B - no thinking (fixed-effort alias)",          "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "none", "requireTier": "strata", "healthCheck": true, "whenDown": "hold", "ctx": 131072 },
+      { "id": "strata-swift-low",    "name": "Swift 1.5 125B - thinking low, 4K cap (fixed-effort alias)", "kind": "chat", "url": "http://127.0.0.1:8081", "effort": "low", "reasoningBudget": 4096, "requireTier": "strata", "healthCheck": true, "whenDown": "hold", "ctx": 131072 },
       { "id": "gemma-worker",        "name": "Gemma 4 12B (worker) - chat only",                "kind": "chat", "url": "http://192.168.1.50:8080", "think": false, "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
       { "id": "gemma-worker-think",  "name": "Gemma 4 12B (worker) - chat only, thinking",      "kind": "chat", "url": "http://192.168.1.50:8080", "think": true,  "chatOnly": true, "promptBudget": 2600, "maxReply": 1024, "requireModel": "gemma", "ctx": 4096 },
+      { "id": "swift-hotrod-remote", "name": "Qwen3.8 Flash-Next on a Linux Strata-HotRod box (example; remove if unused)", "kind": "chat", "url": "http://linux-box.example-tailnet.ts.net:8095",
+        "backendKeyFile": "backend-keys\\hotrod.txt", "healthCheck": true, "whenDown": "hold", "ctx": 131072,
+        "_comment": "docs/engines/hotrod.md. A remote engine: no requireTier (the supervisor can't load or unload it for games). backendKeyFile holds the key HotRod was started with (--api-key) and is git-ignored. Give HotRod's config \"aliases\": [\"home\"] or set backendModel here" },
       { "id": "jev-decision",        "name": "Jev decision - fixed-choice answers",             "kind": "jev", "ctx": 4096 }
     ]
   },

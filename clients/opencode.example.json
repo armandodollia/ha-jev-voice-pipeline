@@ -1,0 +1,53 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "home": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Home GPUs (gateway over Tailscale)",
+      "options": {
+        "baseURL": "https://<pc>.<your-tailnet>.ts.net:8446/v1",
+        "timeout": 15300000,
+        "apiKey": "{file:~/.config/opencode/home-gateway.key}"
+      },
+      "models": {
+        "swift-1.5-125b-strata": {
+          "name": "Swift 1.5 125B (4090, 256K)",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true,
+          "limit": { "context": 262144, "output": 32768 },
+          "options": { "reasoningEffort": "medium" },
+          "variants": {
+            "none":   { "reasoningEffort": "none" },
+            "low":    { "reasoningEffort": "low", "reasoning_budget_tokens": 4096 },
+            "medium": { "reasoningEffort": "medium" },
+            "high":   { "reasoningEffort": "high" }
+          }
+        },
+        "gemma-worker": {
+          "name": "Gemma 4 12B (worker) - chat only, no thinking",
+          "tool_call": false,
+          "reasoning": false,
+          "limit": { "context": 4096, "output": 1024 }
+        },
+        "gemma-worker-think": {
+          "name": "Gemma 4 12B (worker) - chat only, thinking",
+          "tool_call": false,
+          "reasoning": true,
+          "limit": { "context": 4096, "output": 1024 }
+        },
+        "jev-decision": {
+          "name": "Jev decision (worker) - fixed-choice answers",
+          "tool_call": false,
+          "reasoning": false,
+          "limit": { "context": 4096, "output": 512 }
+        }
+      }
+    }
+  },
+  "enabled_providers": ["home"],
+  "model": "home/swift-1.5-125b-strata",
+  "small_model": "home/gemma-worker"
+}

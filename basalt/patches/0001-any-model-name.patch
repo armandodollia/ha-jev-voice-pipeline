@@ -1,0 +1,30 @@
+Basalt local patch: with BASALT_ANY_MODEL_NAME=1 and one model loaded, any request model name reaches it.
+Strata and llama-server answer whatever name a client sends; Basalt only answers the names it serves (its alias),
+so a client that talks to the router directly with another name (e.g. "swift-1.5-125b-strata") gets "unknown model"
+without it. The gateway rewrites names itself and does not need it. scripts/strata-serve.ps1 sets the
+variable (config.json strata.basalt.anyModelName). Apply in the basalt_ada checkout:  git apply <this file>
+Re-apply after every git pull of the fork.
+
+diff --git a/serve/router.py b/serve/router.py
+index 020b9a11..1d7e2fe6 100644
+--- a/serve/router.py
++++ b/serve/router.py
+@@ -11,6 +11,7 @@ ends. Turns follow one rule, so mixed traffic cannot starve or thrash:
+ from __future__ import annotations
+ 
+ import collections
++import os
+ import threading
+ import time
+ 
+@@ -61,6 +62,10 @@ class Router:
+             for svc in self.services:
+                 if name in svc.served_names():
+                     return svc
++        # Local patch (home setup, 2026-11-19): with BASALT_ANY_MODEL_NAME=1 and one model, any name reaches it, the way
++        # Strata/llama.cpp answered "home", "swift-1.5-125b-strata" and other client-side names.
++        if len(self.services) == 1 and os.environ.get("BASALT_ANY_MODEL_NAME") == "1":
++            return self.services[0]
+         return None
+ 
+     def shown(self):
