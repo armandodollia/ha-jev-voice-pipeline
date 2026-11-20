@@ -15,3 +15,5 @@ __pycache__/
 eval/cases.json
 eval/results_*.json
 gateway-key.txt
+gateway-keys/
+*.key

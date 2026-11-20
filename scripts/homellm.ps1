@@ -27,7 +27,7 @@
 #   upgradeDelaySec      overrides llm.upgradeDelaySec when upgrading INTO this tier (e.g. 300 for a model whose load
 #                        stalls the PC for a minute, so it only loads after a few idle minutes)
 #   model.estMiB         VRAM footprint to plan with instead of the file-size guess (tight cards)
-#   external             a server this script doesn't launch itself (Strata: README > Strata tier). Started with
+#   external             a server this script doesn't launch itself (Strata or Basalt: README > Big MoE tier). Started with
 #                        `schtasks /Run` on external.task, recognised by external.processMatch (regex on the command
 #                        line) or an executable under external.pathPrefix, stopped by killing those process trees. Its
 #                        footprint stays external.estMiB (Strata's cache fills whatever VRAM is free, so the measured
